@@ -39,6 +39,7 @@
 #include <QTableWidget>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -207,8 +208,27 @@ void MainWindow::buildUi()
     toolbar->addAction(m_openAction);
     toolbar->addAction(m_chooseAction);
     toolbar->addSeparator();
-    toolbar->addAction(m_exportCsvAction);
-    toolbar->addAction(m_exportJsonAction);
+
+    auto* exportMenu = new QMenu(QStringLiteral("导出"), toolbar);
+    exportMenu->addAction(m_exportCsvAction);
+    exportMenu->addAction(m_exportJsonAction);
+
+    auto* exportButton = new QToolButton(toolbar);
+    exportButton->setText(QStringLiteral("导出"));
+    exportButton->setMenu(exportMenu);
+    exportButton->setPopupMode(QToolButton::InstantPopup);
+    exportButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    exportButton->setAutoRaise(true);
+    toolbar->addWidget(exportButton);
+
+    const auto updateExportButton = [this, exportButton]() {
+        exportButton->setEnabled(m_exportCsvAction->isEnabled()
+                                 || m_exportJsonAction->isEnabled());
+    };
+    connect(m_exportCsvAction, &QAction::changed, exportButton, updateExportButton);
+    connect(m_exportJsonAction, &QAction::changed, exportButton, updateExportButton);
+    updateExportButton();
+
     toolbar->addSeparator();
     toolbar->addAction(m_saveAction);
     toolbar->addAction(m_saveAsAction);
