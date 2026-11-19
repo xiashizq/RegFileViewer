@@ -159,6 +159,30 @@ QString formatRecordCount(const InterfaceDefinition& definition,
     return number;
 }
 
+/// 分隔符文件另存为后，文件名就是文件类型/发送方/日期等信息来源，需要同步更新。
+void updateDelimitedMetadata(Document& document, const QString& path)
+{
+    const QFileInfo info(path);
+    document.filePath = info.absoluteFilePath();
+    document.senderCode.clear();
+    document.fileDate.clear();
+
+    InterfaceDefinition& definition = document.definition;
+    definition.configFile = info.fileName();
+    definition.section = info.fileName();
+    definition.describe = info.completeBaseName();
+    definition.fileType.clear();
+
+    const QStringList parts = info.completeBaseName().split(QLatin1Char('_'));
+    if (parts.size() >= 4) {
+        document.senderCode = parts.at(0);
+        definition.fileType = parts.at(1);
+        definition.describe = QStringLiteral("%1 内部清算文件").arg(parts.at(2));
+        if (parts.at(3).size() == 8)
+            document.fileDate = parts.at(3);
+    }
+}
+
 /// 用文档中的全部数据行重建文件：报文头与文件尾原样保留，数据区按行顺序输出，
 /// 同时更新记录数声明。firstDataLine 返回第一条数据行的行号（1 开始）。
 bool rebuildFile(const QString& sourcePath, const QString& targetPath,
@@ -583,8 +607,8 @@ bool TableModel::duplicateColumn(int tableColumn, QString* columnName)
         return false;
 
     QHash<int, QString> values;
-    values.reserve(m_document.rows.size());
-    for (int row = 0; row < m_document.rows.size(); ++row) {
+    values.reserve(m_document.rowCount());
+    for (int row = 0; row < m_document.rowCount(); ++row) {
         const QString value = cellValue(row, sourceColumn);
         if (!value.isEmpty())
             values.insert(row, value);
@@ -704,14 +728,27 @@ void TableModel::rebuildVisibleRows()
             const QString line = m_document.sourceLineText(row);
             matched = regex.match(line).hasMatch();
             if (!matched) {
-                for (int column = 0; column < columns && !matched; ++column)
+                for (int column = 0; column < columns && !matched; ++column) {
                     matched = regex.match(cellValue(row, column)).hasMatch();
+                    if (!matched && m_translate) {
+                        const QString meaning = translatedValue(row, column);
+                        matched = !meaning.isEmpty() && regex.match(meaning).hasMatch();
+                    }
+                }
             }
         } else {
             for (int column = 0; column < columns; ++column) {
                 if (cellValue(row, column).contains(filter, Qt::CaseInsensitive)) {
                     matched = true;
                     break;
+                }
+                if (m_translate) {
+                    const QString meaning = translatedValue(row, column);
+                    if (!meaning.isEmpty()
+                        && meaning.contains(filter, Qt::CaseInsensitive)) {
+                        matched = true;
+                        break;
+                    }
                 }
             }
         }
@@ -742,7 +779,16 @@ bool TableModel::applyFieldEdit(QByteArray& row, int fieldIndex, const QString& 
             row.append(QByteArray(required - row.size(), ' '));
         row.replace(field.offset, field.length, bytes);
     } else {
-        const QString text = paddedFieldText(field, value);
+        QString text;
+        if (field.type == QLatin1Char('N')) {
+            bool ok = true;
+            text = numericFieldText(field, value, &ok, error);
+            if (!ok)
+                return false;
+        } else {
+            text = paddedFieldText(field, value);
+        }
+
         QString line = decodeText(row, definition.encoding);
         const int required = field.offset + field.length;
         if (line.size() < required)
@@ -860,6 +906,33 @@ bool TableModel::saveToFile(const QString& path, QString* error, int* droppedBla
         m_document.sourceLines.append(firstDataLine + i);
 
     m_document.filePath = QFileInfo(path).absoluteFilePath();
+
+    // 文件中的记录数已经更新，同步内存中的声明值和文件头显示
+    const int recordLine = (m_document.definition.isOfd()
+                            ? 6 : m_document.definition.rowCountCheckRow) - 1;
+    if (recordLine >= 0 && recordLine < m_document.headerLines.size()) {
+        const QByteArray original = m_document.headerLines.at(recordLine).toLatin1();
+        m_document.headerLines[recordLine] =
+                formatRecordCount(m_document.definition, original, dataRows.size());
+        m_document.declaredRecordCount = dataRows.size();
+    } else {
+        m_document.declaredRecordCount = -1;
+    }
+
+    // 保存后，记录数/空文件相关提示已经过时
+    QStringList warnings;
+    warnings.reserve(m_document.warnings.size());
+    for (const QString& warning : m_document.warnings) {
+        if (warning.startsWith(QStringLiteral("记录数不一致")))
+            continue;
+        if (!dataRows.isEmpty()
+            && warning.startsWith(QStringLiteral("文件中没有解析到数据行"))) {
+            continue;
+        }
+        warnings.append(warning);
+    }
+    m_document.warnings = warnings;
+
     m_edits.clear();
 
     if (dropped > 0) {
@@ -994,7 +1067,19 @@ bool TableModel::saveDelimitedFile(const QString& path, QString* error,
     for (int i = 0; i < values.size(); ++i)
         m_document.sourceLines.append(definition.dataBeginRow + i);
 
-    m_document.filePath = QFileInfo(path).absoluteFilePath();
+    updateDelimitedMetadata(m_document, path);
+
+    if (!values.isEmpty()) {
+        QStringList warnings;
+        warnings.reserve(m_document.warnings.size());
+        for (const QString& warning : m_document.warnings) {
+            if (warning.startsWith(QStringLiteral("文件中没有解析到数据行")))
+                continue;
+            warnings.append(warning);
+        }
+        m_document.warnings = warnings;
+    }
+
     m_edits.clear();
 
     if (dropped > 0) {
@@ -1177,13 +1262,21 @@ QByteArray TableModel::rowsClipboardData(const QVector<int>& documentRows) const
     out.setVersion(QDataStream::Qt_5_15);
 
     const InterfaceDefinition& definition = m_document.definition;
-    out << QStringLiteral("RFV-ROWS-2")
+
+    QStringList fieldNames;
+    fieldNames.reserve(definition.fields.size());
+    for (const FieldDefinition& field : definition.fields)
+        fieldNames.append(field.nameCn.isEmpty() ? field.nameEn : field.nameCn);
+
+    out << QStringLiteral("RFV-ROWS-3")
         << definition.configFile
         << definition.section
         << qint32(definition.fieldCount)
         << qint32(int(definition.layout))
         << qint32(definition.rowLength)
-        << qint32(documentRows.size());
+        << qint32(documentRows.size())
+        << fieldNames
+        << definition.delimiter;
 
     for (int row : documentRows) {
         if (definition.layout == Layout::Delimited) {
@@ -1226,17 +1319,50 @@ bool TableModel::appendRowsFromClipboard(const QByteArray& data, QString* error)
     qint32 layout = -1;
     qint32 rowLength = 0;
     qint32 count = 0;
+    QStringList fieldNames;
+    QString delimiter;
     in >> magic >> config >> section >> fields >> layout >> rowLength >> count;
+    if (magic == QStringLiteral("RFV-ROWS-3"))
+        in >> fieldNames >> delimiter;
+    if (in.status() != QDataStream::Ok) {
+        if (error)
+            *error = QStringLiteral("剪贴板中的行数据不完整");
+        return false;
+    }
 
     const InterfaceDefinition& definition = m_document.definition;
     if (magic != QStringLiteral("RFV-ROWS-2")
-        || config != definition.configFile
-        || section != definition.section
-        || fields != definition.fieldCount
-        || layout != int(definition.layout)
-        || rowLength != definition.rowLength) {
+        && magic != QStringLiteral("RFV-ROWS-3")) {
         if (error)
-            *error = QStringLiteral("复制的行来自其他接口配置，无法粘贴到当前文件");
+            *error = QStringLiteral("剪贴板中的行数据格式无法识别");
+        return false;
+    }
+
+    const bool sameLayout = layout == int(definition.layout)
+            && fields == definition.fieldCount;
+    bool compatible = sameLayout;
+    if (definition.layout == Layout::Delimited) {
+        if (magic == QStringLiteral("RFV-ROWS-3")) {
+            QStringList currentNames;
+            currentNames.reserve(definition.fields.size());
+            for (const FieldDefinition& field : definition.fields)
+                currentNames.append(field.nameCn.isEmpty() ? field.nameEn : field.nameCn);
+            compatible = compatible && fieldNames == currentNames
+                    && delimiter == definition.delimiter;
+        }
+    } else {
+        compatible = compatible
+                && config == definition.configFile
+                && section == definition.section
+                && rowLength == definition.rowLength;
+    }
+
+    if (!compatible) {
+        if (error) {
+            *error = definition.layout == Layout::Delimited
+                    ? QStringLiteral("复制的行来自不同的内部清算文件（字段数或表头不一致）")
+                    : QStringLiteral("复制的行来自其他接口配置，无法粘贴到当前文件");
+        }
         return false;
     }
     if (count <= 0 || count > 100000) {
@@ -1296,6 +1422,13 @@ bool TableModel::appendRows(const QVector<QByteArray>& rows)
                 row.append(QByteArray(rowLength - row.size(), ' '));
             else if (row.size() > rowLength)
                 row.truncate(rowLength);
+        } else {
+            QString line = decodeText(row, m_document.definition.encoding);
+            if (line.size() < rowLength)
+                line = line.leftJustified(rowLength, QLatin1Char(' '));
+            else if (line.size() > rowLength)
+                line = line.left(rowLength);
+            row = encodeText(line, m_document.definition.encoding);
         }
 
         const int index = m_document.rows.size();

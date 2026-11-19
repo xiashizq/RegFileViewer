@@ -216,7 +216,7 @@ void InfoPanel::addPlaceholder()
     m_layout->addWidget(title);
 
     auto* hint = new QLabel(QStringLiteral(
-        "将中登 OFD 文件或理财登定长文件\n拖入窗口，或按 Ctrl+O 选择。"));
+        "将中登 OFD 文件、理财登定长文件\n或内部清算文件拖入窗口，或按 Ctrl+O 选择。"));
     hint->setProperty("role", QStringLiteral("placeholder-text"));
     hint->setAlignment(Qt::AlignHCenter);
     hint->setWordWrap(true);
@@ -282,7 +282,8 @@ void InfoPanel::setDocument(const Document* document, const ConfigRepository* re
     auto* chips = new QHBoxLayout;
     chips->setSpacing(6);
     chips->addWidget(makeChip(protocolCategory(definition), "protocol"));
-    chips->addWidget(makeChip(definition.versionLabel, "version"));
+    if (!definition.versionLabel.isEmpty())
+        chips->addWidget(makeChip(definition.versionLabel, "version"));
 
     if (!hasData)
         chips->addWidget(makeChip(QStringLiteral("无数据"), "muted"));
@@ -302,7 +303,10 @@ void InfoPanel::setDocument(const Document* document, const ConfigRepository* re
     int row = 0;
     row = addRow(interfaceGrid, row, QStringLiteral("接口"), definition.describe);
     row = addRow(interfaceGrid, row, QStringLiteral("协议"), definition.protocol);
-    row = addRow(interfaceGrid, row, QStringLiteral("配置文件"), definition.configFile, true);
+    row = addRow(interfaceGrid, row,
+                 definition.isDelimited() ? QStringLiteral("数据文件")
+                                          : QStringLiteral("配置文件"),
+                 definition.configFile, true);
     if (definition.isOfd())
         row = addRow(interfaceGrid, row, QStringLiteral("配置段"), definition.section, true);
     else if (definition.isDelimited())
@@ -351,10 +355,15 @@ void InfoPanel::setDocument(const Document* document, const ConfigRepository* re
     }
     row = addRow(statsGrid, row, QStringLiteral("编码"), definition.encoding);
     row = addRow(statsGrid, row, QStringLiteral("布局"), layoutLabel(definition.layout));
-    row = addRow(statsGrid, row, QStringLiteral("结束标识"),
-                 document->sawEndMarker
-                 ? QStringLiteral("已找到 · %1").arg(definition.lastRowCheck)
-                 : QStringLiteral("未找到"));
+    if (definition.lastRowCheck.isEmpty()) {
+        row = addRow(statsGrid, row, QStringLiteral("结束标识"),
+                     QStringLiteral("不适用"));
+    } else {
+        row = addRow(statsGrid, row, QStringLiteral("结束标识"),
+                     document->sawEndMarker
+                     ? QStringLiteral("已找到 · %1").arg(definition.lastRowCheck)
+                     : QStringLiteral("未找到"));
+    }
     row = addRow(statsGrid, row, QStringLiteral("耗时"),
                  QStringLiteral("%1 ms").arg(document->parseMilliseconds));
 

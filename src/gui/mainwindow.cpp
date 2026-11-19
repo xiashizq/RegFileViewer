@@ -2,6 +2,7 @@
 
 #include "core/exporter.h"
 #include "gui/choosedialog.h"
+#include "gui/filetyperefdialog.h"
 #include "gui/infopanel.h"
 
 #include <QAction>
@@ -127,6 +128,15 @@ void MainWindow::createActions()
     m_selectAllAction->setEnabled(false);
     connect(m_selectAllAction, &QAction::triggered, this, &MainWindow::selectAll);
 
+    m_focusFilterAction = new QAction(QStringLiteral("聚焦筛选框(&F)"), this);
+    m_focusFilterAction->setShortcut(QKeySequence::Find);
+    connect(m_focusFilterAction, &QAction::triggered, this, [this]() {
+        if (!m_filterEdit)
+            return;
+        m_filterEdit->setFocus();
+        m_filterEdit->selectAll();
+    });
+
     m_dictionaryAction = new QAction(QStringLiteral("字典翻译"), this);
     m_dictionaryAction->setCheckable(true);
     m_dictionaryAction->setChecked(true);
@@ -173,6 +183,16 @@ void MainWindow::createActions()
 
     m_aboutAction = new QAction(QStringLiteral("关于(&A)..."), this);
     connect(m_aboutAction, &QAction::triggered, this, &MainWindow::showAbout);
+
+    m_ofdFileTypeAction = new QAction(QStringLiteral("中登文件(&C)..."), this);
+    connect(m_ofdFileTypeAction, &QAction::triggered, this, [this]() {
+        showFileTypeReference(FileTypeReferenceKind::Ofd);
+    });
+
+    m_wealthFileTypeAction = new QAction(QStringLiteral("理财登文件(&W)..."), this);
+    connect(m_wealthFileTypeAction, &QAction::triggered, this, [this]() {
+        showFileTypeReference(FileTypeReferenceKind::WealthManagement);
+    });
 }
 
 void MainWindow::buildUi()
@@ -402,6 +422,12 @@ void MainWindow::buildMenus()
     viewMenu->addAction(m_dictionaryAction);
     viewMenu->addAction(m_englishHeaderAction);
     viewMenu->addAction(m_autoWidthAction);
+    viewMenu->addSeparator();
+    viewMenu->addAction(m_focusFilterAction);
+
+    auto* referenceMenu = menuBar()->addMenu(QStringLiteral("文件类型参考(&T)"));
+    referenceMenu->addAction(m_ofdFileTypeAction);
+    referenceMenu->addAction(m_wealthFileTypeAction);
 
     auto* helpMenu = menuBar()->addMenu(QStringLiteral("帮助(&H)"));
     helpMenu->addAction(m_aboutAction);
@@ -421,23 +447,26 @@ void MainWindow::openFile(const QString& path, bool forceChoose)
         return;
     }
 
-    // 内部清算等竖线分隔文件：在独立窗口打开
+    // 内部清算等竖线分隔文件：直接在当前窗口打开
     if (probe.isDelimited) {
+        if (!maybeSaveChanges())
+            return;
+
         Document document;
-        if (!FileParser::parseDelimited(absolutePath, document, &error)) {
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        const bool ok = FileParser::parseDelimited(absolutePath, document, &error);
+        QApplication::restoreOverrideCursor();
+        if (!ok) {
             QMessageBox::critical(this, QStringLiteral("解析失败"), error);
             return;
         }
 
-        auto* window = new MainWindow(m_repository);
-        window->setAttribute(Qt::WA_DeleteOnClose);
-        window->showDelimitedDocument(std::move(document));
-        window->show();
-
+        showDelimitedDocument(std::move(document));
         addRecentFile(absolutePath);
+        QSettings().setValue(QStringLiteral("lastDir"),
+                             QFileInfo(absolutePath).absolutePath());
         statusBar()->showMessage(
-            QStringLiteral("已在独立窗口打开：%1")
-                .arg(QFileInfo(absolutePath).fileName()), 5000);
+            QStringLiteral("已打开：%1").arg(QFileInfo(absolutePath).fileName()), 5000);
         return;
     }
 
@@ -526,7 +555,6 @@ void MainWindow::showDelimitedDocument(Document document)
     // 分隔符文件没有预设解析方案可选
     m_chooseAction->setEnabled(false);
     m_chooseAction->setToolTip(QStringLiteral("内部清算文件不支持重新选择解析方案"));
-    resize(1200, 760);
 }
 
 QList<InterfaceDefinition> MainWindow::allDefinitionsFor(bool ofd) const
@@ -583,6 +611,7 @@ void MainWindow::setDocument(Document document)
     m_pasteAction->setEnabled(true);
     m_selectAllAction->setEnabled(hasData);
     m_chooseAction->setEnabled(true);
+    m_chooseAction->setToolTip(QString());
     m_duplicateRowAction->setEnabled(hasData);
     m_addRowAction->setEnabled(hasData);
     m_saveAction->setEnabled(m_model->hasUnsavedChanges());
@@ -602,6 +631,19 @@ void MainWindow::setDocument(Document document)
         m_tabs->setTabText(diagnosticIndex, QStringLiteral("诊断"));
         statusBar()->showMessage(QStringLiteral("解析完成"), 5000);
     }
+}
+
+void MainWindow::refreshDocumentViews()
+{
+    if (!m_model->document())
+        return;
+
+    fillInfoPanel();
+    fillInfoBar();
+    fillHeaderTab();
+    fillDiagnosticsTab();
+    fillOverviewTab();
+    updateStatusInfo();
 }
 
 void MainWindow::fillInfoPanel()
@@ -687,9 +729,13 @@ void MainWindow::fillOverviewTab()
 
     add(QStringLiteral("文件"), doc->filePath);
     add(QStringLiteral("协议"),
-        QStringLiteral("%1 %2").arg(definition.protocol, definition.versionLabel));
+        definition.versionLabel.isEmpty()
+        ? definition.protocol
+        : QStringLiteral("%1 %2").arg(definition.protocol, definition.versionLabel));
     add(QStringLiteral("接口"), definition.describe);
-    add(QStringLiteral("配置文件"), definition.configFile);
+    add(definition.isDelimited() ? QStringLiteral("数据文件")
+                                 : QStringLiteral("配置文件"),
+        definition.configFile);
     if (definition.isOfd())
         add(QStringLiteral("配置段"), definition.section);
     else if (definition.isDelimited())
@@ -711,10 +757,14 @@ void MainWindow::fillOverviewTab()
     add(QStringLiteral("数据起始行"), QString::number(definition.dataBeginRow));
     add(QStringLiteral("编码"), definition.encoding);
     add(QStringLiteral("布局"), layoutLabel(definition.layout));
-    add(QStringLiteral("结束标识"),
-        doc->sawEndMarker
-        ? QStringLiteral("已找到 · %1").arg(definition.lastRowCheck)
-        : QStringLiteral("未找到"));
+    if (definition.lastRowCheck.isEmpty()) {
+        add(QStringLiteral("结束标识"), QStringLiteral("不适用"));
+    } else {
+        add(QStringLiteral("结束标识"),
+            doc->sawEndMarker
+            ? QStringLiteral("已找到 · %1").arg(definition.lastRowCheck)
+            : QStringLiteral("未找到"));
+    }
     add(QStringLiteral("解析耗时"), QStringLiteral("%1 ms").arg(doc->parseMilliseconds));
     add(QStringLiteral("当前列数"), QString::number(m_model->dataColumnCount()));
     add(QStringLiteral("新增行"), QString::number(m_model->addedRowCount()));
@@ -763,12 +813,16 @@ void MainWindow::updateStatusInfo()
     m_statusFileLabel->setText(QStringLiteral("文件：%1").arg(elidedPath));
     m_statusFileLabel->setToolTip(path);
 
-    const QString protocol = QStringLiteral("%1 %2")
-            .arg(definition.protocol, definition.versionLabel);
+    const QString protocol = definition.versionLabel.isEmpty()
+            ? definition.protocol
+            : QStringLiteral("%1 %2").arg(definition.protocol, definition.versionLabel);
     m_statusProtocolLabel->setText(QStringLiteral("协议：%1").arg(protocol));
     m_statusProtocolLabel->setToolTip(protocol);
 
-    m_statusConfigLabel->setText(QStringLiteral("配置：%1").arg(definition.configFile));
+    const QString configLabel = definition.isDelimited()
+            ? QStringLiteral("数据文件") : QStringLiteral("配置");
+    m_statusConfigLabel->setText(QStringLiteral("%1：%2")
+                                 .arg(configLabel, definition.configFile));
     m_statusConfigLabel->setToolTip(definition.configFile);
 
     updateCounts();
@@ -878,14 +932,20 @@ void MainWindow::fillDiagnosticsTab()
 
     const InterfaceDefinition& def = doc->definition;
     QStringList lines;
-    lines << QStringLiteral("解析配置：%1").arg(def.configFile);
+    lines << QStringLiteral("%1：%2")
+             .arg(def.isDelimited() ? QStringLiteral("数据文件")
+                                    : QStringLiteral("解析配置"),
+                  def.configFile);
     if (def.isOfd())
         lines << QStringLiteral("配置段　：%1").arg(def.section);
     else if (def.isDelimited())
         lines << QStringLiteral("分隔符　：%1").arg(def.delimiter);
     else
         lines << QStringLiteral("文件规则：%1").arg(def.filePattern);
-    lines << QStringLiteral("协议　　：%1 %2").arg(def.protocol, def.versionLabel);
+    lines << QStringLiteral("协议　　：%1")
+             .arg(def.versionLabel.isEmpty()
+                  ? def.protocol
+                  : QStringLiteral("%1 %2").arg(def.protocol, def.versionLabel));
     lines << QStringLiteral("接口说明：%1").arg(def.describe);
     lines << QStringLiteral("字段数　：%1").arg(def.fieldCount);
     if (!def.isDelimited()) {
@@ -898,8 +958,12 @@ void MainWindow::fillDiagnosticsTab()
              .arg(doc->declaredRecordCount >= 0 ? QString::number(doc->declaredRecordCount)
                                                 : QStringLiteral("-"))
              .arg(doc->rowCount());
-    lines << QStringLiteral("结束标识：%1").arg(doc->sawEndMarker
-        ? QStringLiteral("已找到") : QStringLiteral("未找到"));
+    if (def.lastRowCheck.isEmpty()) {
+        lines << QStringLiteral("结束标识：不适用");
+    } else {
+        lines << QStringLiteral("结束标识：%1").arg(doc->sawEndMarker
+            ? QStringLiteral("已找到") : QStringLiteral("未找到"));
+    }
     lines << QStringLiteral("解析耗时：%1 ms").arg(doc->parseMilliseconds);
     lines << QString();
 
@@ -927,7 +991,7 @@ void MainWindow::updateCounts()
     m_statusLabel->setText(QStringLiteral("共 %1 行 / 显示 %2 行 · %3 列 · %4 ms")
                            .arg(doc->rowCount())
                            .arg(m_model->rowCount())
-                           .arg(doc->fieldCount())
+                           .arg(m_model->dataColumnCount())
                            .arg(doc->parseMilliseconds));
 }
 
@@ -956,15 +1020,32 @@ void MainWindow::applyFilter()
     if (!m_model->document())
         return;
 
+    const QString filterText = m_filterEdit->text();
+    if (m_regexBox->isChecked() && !filterText.trimmed().isEmpty()) {
+        const QRegularExpression regex(filterText);
+        if (!regex.isValid()) {
+            m_filterEdit->setStyleSheet(
+                        QStringLiteral("QLineEdit { border: 1px solid #dc2626; }"));
+            m_filterEdit->setToolTip(
+                        QStringLiteral("正则表达式无效：%1").arg(regex.errorString()));
+            statusBar()->showMessage(
+                        QStringLiteral("正则表达式无效：%1").arg(regex.errorString()),
+                        8000);
+            return;
+        }
+    }
+    m_filterEdit->setStyleSheet(QString());
+    m_filterEdit->setToolTip(QString());
+
     QApplication::setOverrideCursor(Qt::WaitCursor);
-    m_model->setFilter(m_filterEdit->text(), m_regexBox->isChecked());
+    m_model->setFilter(filterText, m_regexBox->isChecked());
     QApplication::restoreOverrideCursor();
     updateCounts();
 
-    if (!m_filterEdit->text().isEmpty()) {
+    if (!filterText.isEmpty()) {
         statusBar()->showMessage(
             QStringLiteral("筛选 “%1”：显示 %2 / %3 行")
-                .arg(m_filterEdit->text())
+                .arg(filterText)
                 .arg(m_model->rowCount())
                 .arg(m_model->document()->rowCount()), 5000);
     }
@@ -1077,7 +1158,12 @@ void MainWindow::saveDocument()
         return;
 
     if (!m_model->hasUnsavedChanges()) {
-        statusBar()->showMessage(QStringLiteral("没有需要保存的修改"), 3000);
+        if (m_model->hasExtraColumnValues()) {
+            statusBar()->showMessage(
+                QStringLiteral("新增列数据请使用“导出 CSV/JSON”保存"), 5000);
+        } else {
+            statusBar()->showMessage(QStringLiteral("没有需要保存的修改"), 3000);
+        }
         return;
     }
 
@@ -1092,8 +1178,7 @@ void MainWindow::saveDocument()
     }
 
     m_saveAction->setEnabled(false);
-    updateStatusInfo();
-    fillOverviewTab();
+    refreshDocumentViews();
     statusBar()->showMessage(QStringLiteral("已保存到 %1").arg(doc->filePath), 6000);
 
     if (m_model->hasExtraColumnValues()) {
@@ -1134,8 +1219,7 @@ void MainWindow::saveDocumentAs()
                    .arg(QFileInfo(m_currentFilePath).fileName()));
 
     m_saveAction->setEnabled(false);
-    updateStatusInfo();
-    fillOverviewTab();
+    refreshDocumentViews();
     statusBar()->showMessage(QStringLiteral("已另存为 %1").arg(m_currentFilePath), 6000);
 
     if (m_model->hasExtraColumnValues()) {
@@ -1147,22 +1231,35 @@ void MainWindow::saveDocumentAs()
 
 bool MainWindow::maybeSaveChanges()
 {
-    if (!m_model || !m_model->hasUnsavedChanges())
-        return true;
+    if (m_model && m_model->hasUnsavedChanges()) {
+        const QMessageBox::StandardButton reply = QMessageBox::question(
+                    this, QStringLiteral("未保存的修改"),
+                    QStringLiteral("当前接口文件有未保存的字段修改，是否保存？"),
+                    QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+                    QMessageBox::Save);
 
-    const QMessageBox::StandardButton reply = QMessageBox::question(
-                this, QStringLiteral("未保存的修改"),
-                QStringLiteral("当前接口文件有未保存的字段修改，是否保存？"),
-                QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
-                QMessageBox::Save);
+        if (reply == QMessageBox::Cancel || reply == QMessageBox::NoButton)
+            return false;
+        if (reply == QMessageBox::Discard)
+            return true;
 
-    if (reply == QMessageBox::Cancel)
-        return false;
-    if (reply == QMessageBox::Discard)
-        return true;
+        saveDocument();
+        if (m_model->hasUnsavedChanges())
+            return false;
+    }
 
-    saveDocument();
-    return !m_model->hasUnsavedChanges();
+    if (m_model && m_model->hasExtraColumnValues()) {
+        const QMessageBox::StandardButton reply = QMessageBox::warning(
+                    this, QStringLiteral("新增列数据"),
+                    QStringLiteral("新增列数据不会写入接口文件，只能通过"
+                                   "“导出 CSV/JSON”保留。\n\n继续将丢失这些新增列数据。"),
+                    QMessageBox::Discard | QMessageBox::Cancel,
+                    QMessageBox::Cancel);
+        if (reply != QMessageBox::Discard)
+            return false;
+    }
+
+    return true;
 }
 
 void MainWindow::copySelectionOrRows()
@@ -1268,8 +1365,7 @@ void MainWindow::pasteRowsFromClipboard(const QByteArray& data)
     if (lastRow >= 0)
         m_table->scrollTo(m_model->index(lastRow, 1), QAbstractItemView::EnsureVisible);
 
-    fillOverviewTab();
-    updateStatusInfo();
+    refreshDocumentViews();
     m_saveAction->setEnabled(m_model->hasUnsavedChanges());
     statusBar()->showMessage(
         QStringLiteral("已粘贴 %1 行到数据末尾").arg(pasted), 4000);
@@ -1390,11 +1486,16 @@ void MainWindow::showTableContextMenu(const QPoint& position)
         QAction* addRowAction = blankMenu.addAction(
                     QStringLiteral("在末尾添加空白行"));
 
+        QAction* addColumnAction = blankMenu.addAction(
+                    QStringLiteral("新增空白列"));
+
         QAction* chosen = blankMenu.exec(m_table->viewport()->mapToGlobal(position));
         if (chosen == pasteRowsAction && hasRowData)
             pasteRowsFromClipboard(rowData);
         else if (chosen == addRowAction)
             addBlankRow();
+        else if (chosen == addColumnAction)
+            addEmptyColumn();
         return;
     }
 
@@ -1410,6 +1511,15 @@ void MainWindow::showTableContextMenu(const QPoint& position)
 
     QAction* detailAction = menu.addAction(QStringLiteral("查看字段详情"));
     detailAction->setEnabled(index.isValid() && index.column() > 0);
+
+    menu.addSeparator();
+
+    QAction* addColumnAction = menu.addAction(QStringLiteral("新增空白列"));
+    QAction* duplicateColumnAction = menu.addAction(QStringLiteral("复制此列"));
+    duplicateColumnAction->setEnabled(index.column() > 0);
+    QAction* renameColumnAction = menu.addAction(QStringLiteral("重命名此列"));
+    renameColumnAction->setEnabled(index.column() > 0
+                                   && m_model->isExtraColumn(index.column() - 1));
 
     menu.addSeparator();
 
@@ -1433,6 +1543,12 @@ void MainWindow::showTableContextMenu(const QPoint& position)
         pasteFromClipboard();
     } else if (chosen == detailAction) {
         showCellInfo(index);
+    } else if (chosen == addColumnAction) {
+        addEmptyColumn();
+    } else if (chosen == duplicateColumnAction) {
+        duplicateSelectedColumn();
+    } else if (chosen == renameColumnAction) {
+        renameSelectedColumn();
     } else if (chosen == duplicateAction) {
         duplicateSelectedRows();
     } else if (chosen == addAction) {
@@ -1466,8 +1582,7 @@ void MainWindow::duplicateSelectedRows()
     if (!m_model->duplicateRows(rows))
         return;
 
-    fillOverviewTab();
-    updateStatusInfo();
+    refreshDocumentViews();
     m_saveAction->setEnabled(m_model->hasUnsavedChanges());
     statusBar()->showMessage(QStringLiteral("已复制 %1 行到下方").arg(rows.size()), 4000);
 }
@@ -1485,11 +1600,69 @@ void MainWindow::addBlankRow()
     if (lastRow >= 0)
         m_table->scrollTo(m_model->index(lastRow, 1), QAbstractItemView::EnsureVisible);
 
-    fillOverviewTab();
-    updateStatusInfo();
+    refreshDocumentViews();
     m_saveAction->setEnabled(m_model->hasUnsavedChanges());
     statusBar()->showMessage(
         QStringLiteral("已在末尾添加空白行，双击单元格填写内容"), 4000);
+}
+
+void MainWindow::addEmptyColumn()
+{
+    if (!m_model->document())
+        return;
+
+    QString name;
+    if (!m_model->appendEmptyColumn(&name))
+        return;
+
+    autoSizeColumns();
+    fillOverviewTab();
+    statusBar()->showMessage(
+        QStringLiteral("已新增列“%1”（仅导出时保留，不写入接口文件）").arg(name), 5000);
+}
+
+void MainWindow::duplicateSelectedColumn()
+{
+    if (!m_model->document())
+        return;
+
+    const QModelIndex current = m_table->currentIndex();
+    if (!current.isValid() || current.column() <= 0)
+        return;
+
+    QString name;
+    if (!m_model->duplicateColumn(current.column(), &name))
+        return;
+
+    autoSizeColumns();
+    fillOverviewTab();
+    statusBar()->showMessage(
+        QStringLiteral("已复制列“%1”（仅导出时保留，不写入接口文件）").arg(name), 5000);
+}
+
+void MainWindow::renameSelectedColumn()
+{
+    if (!m_model->document())
+        return;
+
+    const QModelIndex current = m_table->currentIndex();
+    if (!current.isValid() || current.column() <= 0)
+        return;
+
+    const int dataColumn = current.column() - 1;
+    if (!m_model->isExtraColumn(dataColumn))
+        return;
+
+    bool ok = false;
+    const QString oldName = m_model->dataColumnHeader(dataColumn);
+    const QString name = QInputDialog::getText(
+                this, QStringLiteral("重命名列"), QStringLiteral("列名："),
+                QLineEdit::Normal, oldName, &ok);
+    if (!ok || name.trimmed().isEmpty())
+        return;
+
+    if (m_model->renameColumn(current.column(), name))
+        statusBar()->showMessage(QStringLiteral("列已重命名为“%1”").arg(name.trimmed()), 4000);
 }
 
 void MainWindow::resetFilterForRowEdit()
@@ -1516,10 +1689,21 @@ void MainWindow::showCellInfo(const QModelIndex& index)
     }
 
     const int fieldIndex = index.column() - 1;
+    const int documentRow = m_model->visibleRows().value(index.row());
+
+    if (m_model->isExtraColumn(fieldIndex)) {
+        QMessageBox::information(this, QStringLiteral("新增列"),
+            QStringLiteral("列名：%1\n值：%2\n源行号：%3\n\n"
+                           "新增列仅用于导出 CSV/JSON，不会写入接口文件。")
+                .arg(m_model->dataColumnHeader(fieldIndex),
+                     m_model->cellValue(documentRow, fieldIndex))
+                .arg(doc->sourceLines.value(documentRow)));
+        return;
+    }
+
     if (fieldIndex < 0 || fieldIndex >= doc->definition.fields.size())
         return;
 
-    const int documentRow = m_model->visibleRows().value(index.row());
     const FieldDefinition& field = doc->definition.fields.at(fieldIndex);
     const QString value = doc->value(documentRow, fieldIndex);
 
@@ -1574,6 +1758,12 @@ void MainWindow::showAbout()
             "<p>基于 Qt 5.15.2 / C++ 开发，支持 Windows 7 SP1 及以上系统。</p>"
             "<p style='color:#9aa3b2;font-size:8pt'>接口解析配置基于 FFReader（LGPL-3.0）</p>")
         .arg(version));
+}
+
+void MainWindow::showFileTypeReference(FileTypeReferenceKind kind)
+{
+    FileTypeReferenceDialog dialog(*m_repository, kind, this);
+    dialog.exec();
 }
 
 void MainWindow::loadRecentFiles()

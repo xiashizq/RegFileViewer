@@ -23,6 +23,7 @@ class QTimer;
 namespace rfv {
 
 class InfoPanel;
+enum class FileTypeReferenceKind;
 
 class MainWindow : public QMainWindow
 {
@@ -76,8 +77,13 @@ private:
     void showTableContextMenu(const QPoint& position);
     void duplicateSelectedRows();
     void addBlankRow();
+    void addEmptyColumn();
+    void duplicateSelectedColumn();
+    void renameSelectedColumn();
     void resetFilterForRowEdit();
+    void refreshDocumentViews();
     void showAbout();
+    void showFileTypeReference(FileTypeReferenceKind kind);
 
     void loadRecentFiles();
     void addRecentFile(const QString& path);
@@ -123,12 +129,15 @@ private:
     QAction* m_copyAction = nullptr;
     QAction* m_pasteAction = nullptr;
     QAction* m_selectAllAction = nullptr;
+    QAction* m_focusFilterAction = nullptr;
     QAction* m_dictionaryAction = nullptr;
     QAction* m_englishHeaderAction = nullptr;
     QAction* m_autoWidthAction = nullptr;
     QAction* m_toggleInfoAction = nullptr;
     QAction* m_duplicateRowAction = nullptr;
     QAction* m_addRowAction = nullptr;
+    QAction* m_ofdFileTypeAction = nullptr;
+    QAction* m_wealthFileTypeAction = nullptr;
     QAction* m_aboutAction = nullptr;
 
     QString m_currentFilePath;

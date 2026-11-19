@@ -189,9 +189,8 @@ bool writeCsv(const QString& path, const TableSource& source, const QVector<int>
     if (options.includeHeader) {
         QStringList header;
         header.append(QStringLiteral("源行号"));
-        header.append(source.headers);
-        if (options.translate)
-            header.append(QStringLiteral("_字典翻译"));
+        for (const QString& name : source.headers)
+            header.append(csvEscape(name, options.delimiter));
         stream << header.join(options.delimiter) << "\n";
     }
 
@@ -201,16 +200,15 @@ bool writeCsv(const QString& path, const TableSource& source, const QVector<int>
         values.reserve(source.columns + 1);
         values.append(QString::number(source.document->sourceLines.value(documentRow)));
 
-        QStringList meanings;
         for (int column = 0; column < source.columns; ++column) {
-            values.append(csvEscape(source.value(documentRow, column), options.delimiter));
+            QString cell = source.value(documentRow, column);
             if (options.translate) {
-                meanings.append(csvEscape(source.meaning(documentRow, column),
-                                          options.delimiter));
+                const QString meaning = source.meaning(documentRow, column);
+                if (!meaning.isEmpty() && meaning != cell)
+                    cell += QLatin1Char('/') + meaning;
             }
+            values.append(csvEscape(cell, options.delimiter));
         }
-        if (options.translate)
-            values.append(meanings.join(options.delimiter));
 
         stream << values.join(options.delimiter) << "\n";
     }
