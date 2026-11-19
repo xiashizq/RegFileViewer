@@ -1,0 +1,46 @@
+﻿# 鏋勫缓浜х墿
+build*/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.ninja
+.ninja_deps
+.ninja_log
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.user.*
+*.autosave
+CMakeUserPresets.json
+
+# 浜岃繘鍒?璋冭瘯鏂囦欢
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.obj
+
+# 绯荤粺
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 涓存椂瀵煎嚭
+*.csv
+*.json
+!conf/**/*.json
+
+# Python
+__pycache__/
+*.pyc
+
+
+# Qt Creator
+.qtcreator/

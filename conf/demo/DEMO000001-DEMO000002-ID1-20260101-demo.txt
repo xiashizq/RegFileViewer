@@ -1,0 +1,19 @@
+WPID
+1.1
+14
+1=C,40,0,报告编号,Report_ID
+2=C,20,0,理财产品代码,WPCode
+3=C,20,0,产品登记编码,WPRegCode
+4=C,4,0,报告一级类型,Report_Type
+5=C,4,0,报告二级类型,Report_SubType
+6=A,8,0,报告日期,Report_Date
+7=C,512,0,报告标题,Sys_Title
+8=C,20,0,审批编号,App_No
+9=C,19,0,更新时间,Update_Time
+10=C,1,0,操作标识,Operate_Flag
+11=C,150,0,传输文件名,File_Name
+12=C,1,0,通用标识,CommonFlag
+2
+RPT20260101000001                       LC0001              Z7000000000001      0001000120260101示例理财产品年度报告                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            AP0001              2026-01-01 09:30:001demo.txt                                                                                                                                              1Appenden1                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       Appenden1                                                                                                                                             
+RPT20260101000002                       LC0002              Z7000000000002      0001000120260101示例理财产品年度报告                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            AP0002              2026-01-01 09:30:001demo.txt                                                                                                                                              1Appenden2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       Appenden2                                                                                                                                             
+WPIDEND
