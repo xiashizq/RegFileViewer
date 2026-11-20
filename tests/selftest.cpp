@@ -67,8 +67,14 @@ bool verifyModel(const rfv::Document& document, rfv::TableModel& model)
         }
     }
 
-    if (model.data(model.index(0, 0), Qt::DisplayRole).toString().isEmpty()) {
-        printf("       [FAIL] 表格模型首行源行号为空\n");
+    const QString firstHeader = model.headerData(0, Qt::Horizontal,
+                                                 Qt::DisplayRole).toString();
+    if (firstHeader != QStringLiteral("序号")) {
+        printf("       [FAIL] 表格模型首列表头不是“序号”\n");
+        return false;
+    }
+    if (model.data(model.index(0, 0), Qt::DisplayRole).toInt() != 1) {
+        printf("       [FAIL] 表格模型序号列内容不正确\n");
         return false;
     }
 
@@ -270,6 +276,102 @@ bool verifyExport(const rfv::Document& document, const rfv::TableModel& model,
     return true;
 }
 
+bool verifyDelete(const rfv::Document& document, const QString& baseName)
+{
+    if (document.rowCount() == 0)
+        return true;
+
+    QDir dir(QDir::tempPath() + QStringLiteral("/rfv_selftest"));
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+        printf("       [FAIL] 无法创建临时删除测试目录\n");
+        return false;
+    }
+
+    QString suffix = QFileInfo(document.filePath).suffix();
+    if (!suffix.isEmpty())
+        suffix.prepend(QLatin1Char('.'));
+    const QString path = dir.filePath(baseName + QStringLiteral("_deleted") + suffix);
+
+    rfv::TableModel model;
+    model.setDocument(document);
+    const int before = model.rowCount();
+    if (!model.deleteRows(QVector<int>() << 0)
+        || model.rowCount() != before - 1
+        || !model.hasUnsavedChanges()) {
+        printf("       [FAIL] 删除行失败\n");
+        return false;
+    }
+
+    QString error;
+    if (!model.saveToFile(path, &error)) {
+        printf("       [FAIL] 删除行后保存失败：%s\n", qUtf8Printable(error));
+        return false;
+    }
+    if (model.hasUnsavedChanges()) {
+        printf("       [FAIL] 删除行保存后仍标记为未保存\n");
+        return false;
+    }
+
+    rfv::Document reloaded;
+    if (document.definition.layout == rfv::Layout::Delimited) {
+        if (!rfv::FileParser::parseDelimited(path, reloaded, &error)) {
+            printf("       [FAIL] 删除行后重新解析失败：%s\n", qUtf8Printable(error));
+            return false;
+        }
+    } else if (!rfv::FileParser::parse(path, document.definition, reloaded, &error)) {
+        printf("       [FAIL] 删除行后重新解析失败：%s\n", qUtf8Printable(error));
+        return false;
+    }
+
+    const int expected = before - 1;
+    if (reloaded.rowCount() != expected) {
+        printf("       [FAIL] 删除行后行数不一致：%d != %d\n",
+               reloaded.rowCount(), expected);
+        return false;
+    }
+
+    if (!document.definition.isDelimited()) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            printf("       [FAIL] 无法读取删除后的文件\n");
+            return false;
+        }
+        const QList<QByteArray> rawLines = file.readAll().split('\n');
+        file.close();
+
+        const auto lineValue = [&rawLines](int rowNumber) {
+            if (rowNumber <= 0 || rowNumber > rawLines.size())
+                return QString();
+            QByteArray line = rawLines.at(rowNumber - 1);
+            if (line.endsWith('\r'))
+                line.chop(1);
+            return QString::fromLatin1(line).trimmed();
+        };
+
+        const int countRow = document.definition.isOfd()
+                ? 6 : document.definition.rowCountCheckRow;
+        bool countOk = true;
+        if (countRow > 0) {
+            bool ok = false;
+            const int value = lineValue(countRow).toInt(&ok);
+            countOk = ok && value == expected;
+        }
+        const int extraCountRow = document.definition.dataRecordCountRow;
+        if (countOk && document.definition.isOfd() && extraCountRow > 0) {
+            bool ok = false;
+            const int value = lineValue(extraCountRow).toInt(&ok);
+            countOk = ok && value == expected;
+        }
+        if (!countOk) {
+            printf("       [FAIL] 删除行后记录数未同步更新\n");
+            return false;
+        }
+    }
+
+    printf("       [ OK ] 删除行 / 行数与统计值同步 -> %s\n", qUtf8Printable(path));
+    return true;
+}
+
 bool runFile(rfv::ConfigRepository& repository, const QString& path)
 {
     rfv::FileProbe probe;
@@ -314,7 +416,8 @@ bool runFile(rfv::ConfigRepository& repository, const QString& path)
     printf("       方案: %s  [%s]  候选数=%d\n", qUtf8Printable(definition.describe),
            qUtf8Printable(definition.section), candidateCount);
     printf("       字段: %d  行长度: %d  数据起始行: %d\n",
-           definition.fieldCount, definition.rowLength, definition.dataBeginRow);
+           definition.fieldCount, definition.rowLength,
+           document.definition.dataBeginRow);
     printf("       记录: 声明=%d 实际=%d  结束标识=%s  耗时=%dms\n",
            document.declaredRecordCount, document.rowCount(),
            document.sawEndMarker ? "有" : "无", document.parseMilliseconds);
@@ -331,10 +434,11 @@ bool runFile(rfv::ConfigRepository& repository, const QString& path)
     const bool modelOk = verifyModel(document, model);
     const bool saveOk = verifySave(document, model, baseName);
     const bool exportOk = verifyExport(document, model, baseName);
+    const bool deleteOk = verifyDelete(document, baseName);
 
     printf("\n");
     return document.rowCount() > 0 && document.warnings.isEmpty()
-            && modelOk && saveOk && exportOk;
+            && modelOk && saveOk && exportOk && deleteOk;
 }
 
 } // namespace

@@ -111,6 +111,29 @@ int findDelimitedHeader(const QStringList& lines, QStringList* headerFields)
     return -1;
 }
 
+/// 判断一行是否为 OFD“字段名后的记录数行”（例如 00035397）。
+/// 这类行只有数字，且长度远小于固定长度的数据行。
+bool parseOfdRecordCountLine(const QByteArray& line, int rowLength, int* value)
+{
+    const QByteArray trimmed = line.trimmed();
+    if (trimmed.isEmpty() || trimmed.size() > 20)
+        return false;
+    for (char ch : trimmed) {
+        if (ch < '0' || ch > '9')
+            return false;
+    }
+    if (rowLength > 0 && trimmed.size() >= rowLength)
+        return false;
+
+    bool ok = false;
+    const int parsed = trimmed.toInt(&ok);
+    if (!ok)
+        return false;
+    if (value)
+        *value = parsed;
+    return true;
+}
+
 } // namespace
 
 QByteArray rfv::FileParser::readAllBytes(const QString& path, qint64 maxBytes)
@@ -235,9 +258,9 @@ bool rfv::FileParser::parse(const QString& path, const InterfaceDefinition& defi
     const QByteArray ofdEndMarker("OFDCFEND");
 
     int lineNumber = 0;
-    int badLengthRows = 0;
-    int firstBadLengthLine = 0;
-    int firstBadLengthActual = 0;
+    QVector<int> badLengthLines;
+    QVector<int> badLengthActuals;
+    int firstDataActualLength = -1;
 
     while (!file.atEnd()) {
         QByteArray line = stripLineEnding(file.readLine());
@@ -268,12 +291,12 @@ bool rfv::FileParser::parse(const QString& path, const InterfaceDefinition& defi
                 ? line.size()
                 : decodeText(line, encoding).size();
 
+        if (document.rows.isEmpty())
+            firstDataActualLength = actualLength;
+
         if (actualLength != definition.rowLength && definition.rowLength > 0) {
-            ++badLengthRows;
-            if (badLengthRows == 1) {
-                firstBadLengthLine = lineNumber;
-                firstBadLengthActual = actualLength;
-            }
+            badLengthLines.append(lineNumber);
+            badLengthActuals.append(actualLength);
             if (actualLength < definition.rowLength && definition.lengthType == 0) {
                 line.append(QByteArray(definition.rowLength - actualLength, ' '));
             } else if (actualLength > definition.rowLength && definition.lengthType == 0) {
@@ -286,6 +309,40 @@ bool rfv::FileParser::parse(const QString& path, const InterfaceDefinition& defi
     }
     file.close();
 
+    // 部分 OFD 文件在字段名之后、数据行之前多一行“总记录数”（例如 00035397）。
+    // 该行只有数字且长度远小于数据行，按记录数行处理，不能当作数据行展示；
+    // 这里把它并入文件头，保存时再同步更新。
+    bool removedRecordCountLine = false;
+    int recordCountLineValue = -1;
+    if (definition.isOfd() && !document.rows.isEmpty()
+        && definition.rowLength > 0
+        && firstDataActualLength >= 0
+        && firstDataActualLength < definition.rowLength) {
+        int countValue = -1;
+        if (parseOfdRecordCountLine(document.rows.first(), definition.rowLength, &countValue)) {
+            const int countLine = document.sourceLines.first();
+            // 保留字段名与记录数行之间可能存在的空行，保证文件头行号不错位
+            for (int line = definition.dataBeginRow; line < countLine; ++line)
+                document.headerLines.append(QString());
+            document.headerLines.append(
+                        decodeText(document.rows.first().trimmed(), encoding));
+            document.rows.removeFirst();
+            document.sourceLines.removeFirst();
+            document.definition.dataBeginRow = countLine + 1;
+            document.definition.dataRecordCountRow = countLine;
+            recordCountLineValue = countValue;
+            removedRecordCountLine = true;
+
+            // 该行不是数据行，移除它产生的长度异常记录
+            for (int i = badLengthLines.size() - 1; i >= 0; --i) {
+                if (badLengthLines.at(i) == countLine) {
+                    badLengthLines.remove(i);
+                    badLengthActuals.remove(i);
+                }
+            }
+        }
+    }
+
     // 声明的记录数
     const int recordRow = definition.isOfd() ? 6 : definition.rowCountCheckRow;
     if (recordRow > 0 && document.headerLines.size() >= recordRow) {
@@ -294,6 +351,8 @@ bool rfv::FileParser::parse(const QString& path, const InterfaceDefinition& defi
         if (ok)
             document.declaredRecordCount = declared;
     }
+    if (removedRecordCountLine)
+        document.declaredRecordCount = recordCountLineValue;
 
     // 版本校验
     if (definition.versionCheckRow > 0
@@ -363,12 +422,12 @@ bool rfv::FileParser::parse(const QString& path, const InterfaceDefinition& defi
         }
     }
 
-    if (badLengthRows > 0) {
+    if (!badLengthLines.isEmpty()) {
         document.warnings.append(QStringLiteral(
             "有 %1 行的实际长度与配置的 %2 不一致（首个异常在第 %3 行，实际长度 %4），"
             "已按配置长度补空格/截断")
-            .arg(badLengthRows).arg(definition.rowLength)
-            .arg(firstBadLengthLine).arg(firstBadLengthActual));
+            .arg(badLengthLines.size()).arg(definition.rowLength)
+            .arg(badLengthLines.first()).arg(badLengthActuals.first()));
     }
 
     if (document.declaredRecordCount >= 0

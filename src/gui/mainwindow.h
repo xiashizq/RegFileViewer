@@ -76,6 +76,7 @@ private:
     void showCellInfo(const QModelIndex& index);
     void showTableContextMenu(const QPoint& position);
     void duplicateSelectedRows();
+    void deleteSelectedRows();
     void addBlankRow();
     void addEmptyColumn();
     void duplicateSelectedColumn();
@@ -135,6 +136,7 @@ private:
     QAction* m_autoWidthAction = nullptr;
     QAction* m_toggleInfoAction = nullptr;
     QAction* m_duplicateRowAction = nullptr;
+    QAction* m_deleteRowAction = nullptr;
     QAction* m_addRowAction = nullptr;
     QAction* m_ofdFileTypeAction = nullptr;
     QAction* m_wealthFileTypeAction = nullptr;

@@ -9,7 +9,7 @@
 
 namespace rfv {
 
-/// 表格模型：第 0 列显示源文件行号，其余列对应接口字段或用户新增的列。
+/// 表格模型：每列对应接口字段或用户新增的列。
 /// 字段值按需从原始字节切片解码；编辑内容保存在内存中，导出时生效。
 class TableModel : public QAbstractTableModel
 {
@@ -46,7 +46,7 @@ public:
 
     // ---- 列与单元格 -------------------------------------------------------
 
-    /// 数据列数（接口字段 + 用户新增列），不含源行号列
+    /// 数据列数（接口字段 + 用户新增列）
     int dataColumnCount() const;
     QString dataColumnHeader(int dataColumn) const;
     bool isExtraColumn(int dataColumn) const;
@@ -58,11 +58,11 @@ public:
     /// 在末尾追加一个空白列，返回新列名
     bool appendEmptyColumn(QString* columnName = nullptr);
 
-    /// 复制表格列（tableColumn 含源行号列，从 1 开始）到末尾
-    bool duplicateColumn(int tableColumn, QString* columnName = nullptr);
+    /// 复制表格列（dataColumn 为数据列索引，从 0 开始）到末尾
+    bool duplicateColumn(int dataColumn, QString* columnName = nullptr);
 
-    /// 重命名新增列；接口字段列不允许重命名
-    bool renameColumn(int tableColumn, const QString& name);
+    /// 重命名新增列（dataColumn 为数据列索引，从 0 开始）；接口字段列不允许重命名
+    bool renameColumn(int dataColumn, const QString& name);
 
     int modifiedCellCount() const;
 
@@ -84,6 +84,9 @@ public:
 
     /// 复制指定的可见行，插入到最后一个选中行之后
     bool duplicateRows(const QVector<int>& visibleRows);
+
+    /// 删除指定的可见行（含新增行）
+    bool deleteRows(const QVector<int>& visibleRows);
 
     /// 整行剪贴板：序列化指定的文档行（含编辑内容）
     QByteArray rowsClipboardData(const QVector<int>& documentRows) const;
@@ -116,6 +119,7 @@ private:
     QStringList m_extraNames;
     QVector<QHash<int, QString>> m_extraValues; // 每个新增列：Document 行 -> 值
     QHash<quint64, QString> m_edits;            // 接口字段的编辑结果
+    bool m_hasRemovedRows = false;              // 是否删除过行，删除也需要写回
 };
 
 /// 整行复制使用的自定义剪贴板 MIME 类型

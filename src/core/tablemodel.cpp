@@ -159,6 +159,24 @@ QString formatRecordCount(const InterfaceDefinition& definition,
     return number;
 }
 
+/// 保留原行的前导/尾随空白，只按原数字宽度补零，用于 OFD 字段名后的记录数行。
+QString formatRecordCountPreservingPadding(const QString& original, int count)
+{
+    const QString trimmed = original.trimmed();
+    if (trimmed.isEmpty())
+        return QString::number(count);
+
+    for (const QChar ch : trimmed) {
+        if (!ch.isDigit())
+            return QString::number(count);
+    }
+
+    const int left = original.indexOf(trimmed);
+    return original.left(left)
+            + QString::number(count).rightJustified(trimmed.size(), QLatin1Char('0'))
+            + original.mid(left + trimmed.size());
+}
+
 /// 分隔符文件另存为后，文件名就是文件类型/发送方/日期等信息来源，需要同步更新。
 void updateDelimitedMetadata(Document& document, const QString& path)
 {
@@ -236,6 +254,15 @@ bool rebuildFile(const QString& sourcePath, const QString& targetPath,
                     definition, lines.at(recordLine).content, dataRows.size()).toLatin1();
     }
 
+    // OFD 字段名后、数据前可能还有一行记录数（例如 00035397），同样同步更新
+    const int dataRecordLine = definition.dataRecordCountRow - 1;
+    if (definition.isOfd() && dataRecordLine >= 0 && dataRecordLine < headerCount
+        && dataRecordLine != recordLine) {
+        const QString original = QString::fromLatin1(lines.at(dataRecordLine).content);
+        lines[dataRecordLine].content =
+                formatRecordCountPreservingPadding(original, dataRows.size()).toLatin1();
+    }
+
     QByteArray output = bom;
     for (int i = 0; i < headerCount; ++i) {
         output += lines.at(i).content;
@@ -290,6 +317,7 @@ void TableModel::setDocument(Document document)
     m_extraNames.clear();
     m_extraValues.clear();
     m_edits.clear();
+    m_hasRemovedRows = false;
     endResetModel();
     rebuildVisibleRows();
 }
@@ -303,6 +331,7 @@ void TableModel::clear()
     m_extraNames.clear();
     m_extraValues.clear();
     m_edits.clear();
+    m_hasRemovedRows = false;
     endResetModel();
 }
 
@@ -368,7 +397,7 @@ QVariant TableModel::headerData(int section, Qt::Orientation orientation, int ro
 
     if (role == Qt::DisplayRole) {
         if (section == 0)
-            return QStringLiteral("源行号");
+            return QStringLiteral("序号");
         const int dataColumn = section - 1;
         if (dataColumn < 0 || dataColumn >= dataColumnCount())
             return QVariant();
@@ -377,7 +406,7 @@ QVariant TableModel::headerData(int section, Qt::Orientation orientation, int ro
 
     if (role == Qt::ToolTipRole) {
         if (section == 0)
-            return QStringLiteral("数据在源文件中的行号（不可编辑）");
+            return QStringLiteral("列表序号（仅显示，不写入文件、不参与导出）");
 
         const int dataColumn = section - 1;
         if (dataColumn < 0 || dataColumn >= dataColumnCount())
@@ -465,12 +494,11 @@ QVariant TableModel::data(const QModelIndex& index, int role) const
     const int documentRow = m_visible.at(visibleRow);
 
     if (index.column() == 0) {
-        const int sourceLine = m_document.sourceLines.value(documentRow);
         if (role == Qt::DisplayRole)
-            return sourceLine < 0 ? QStringLiteral("新增") : QString::number(sourceLine);
+            return visibleRow + 1;
         if (role == Qt::ToolTipRole)
-            return sourceLine < 0 ? QStringLiteral("新增行（保存后写入文件）")
-                                  : QStringLiteral("源文件行号：%1").arg(sourceLine);
+            return QStringLiteral("列表序号：%1（仅显示，不写入文件、不参与导出）")
+                    .arg(visibleRow + 1);
         if (role == Qt::TextAlignmentRole)
             return static_cast<int>(Qt::AlignRight | Qt::AlignVCenter);
         if (role == Qt::ForegroundRole)
@@ -597,14 +625,12 @@ bool TableModel::appendEmptyColumn(QString* columnName)
     return true;
 }
 
-bool TableModel::duplicateColumn(int tableColumn, QString* columnName)
+bool TableModel::duplicateColumn(int dataColumn, QString* columnName)
 {
-    if (!m_hasDocument || tableColumn <= 0)
+    if (!m_hasDocument || dataColumn < 0 || dataColumn >= dataColumnCount())
         return false;
 
-    const int sourceColumn = tableColumn - 1;
-    if (sourceColumn < 0 || sourceColumn >= dataColumnCount())
-        return false;
+    const int sourceColumn = dataColumn;
 
     QHash<int, QString> values;
     values.reserve(m_document.rowCount());
@@ -641,12 +667,11 @@ bool TableModel::duplicateColumn(int tableColumn, QString* columnName)
     return true;
 }
 
-bool TableModel::renameColumn(int tableColumn, const QString& name)
+bool TableModel::renameColumn(int dataColumn, const QString& name)
 {
-    if (!m_hasDocument || tableColumn <= 0 || name.trimmed().isEmpty())
+    if (!m_hasDocument || dataColumn < 0 || name.trimmed().isEmpty())
         return false;
 
-    const int dataColumn = tableColumn - 1;
     if (!isExtraColumn(dataColumn))
         return false;
 
@@ -655,7 +680,7 @@ bool TableModel::renameColumn(int tableColumn, const QString& name)
         return false;
 
     m_extraNames[extra] = name.trimmed();
-    emit headerDataChanged(Qt::Horizontal, tableColumn, tableColumn);
+    emit headerDataChanged(Qt::Horizontal, dataColumn + 1, dataColumn + 1);
     return true;
 }
 
@@ -812,7 +837,7 @@ bool TableModel::hasUnsavedChanges() const
 {
     if (!m_hasDocument)
         return false;
-    return !m_edits.isEmpty() || addedRowCount() > 0;
+    return !m_edits.isEmpty() || addedRowCount() > 0 || m_hasRemovedRows;
 }
 
 int TableModel::addedRowCount() const
@@ -908,16 +933,25 @@ bool TableModel::saveToFile(const QString& path, QString* error, int* droppedBla
     m_document.filePath = QFileInfo(path).absoluteFilePath();
 
     // 文件中的记录数已经更新，同步内存中的声明值和文件头显示
+    bool hasCountLine = false;
     const int recordLine = (m_document.definition.isOfd()
                             ? 6 : m_document.definition.rowCountCheckRow) - 1;
     if (recordLine >= 0 && recordLine < m_document.headerLines.size()) {
         const QByteArray original = m_document.headerLines.at(recordLine).toLatin1();
         m_document.headerLines[recordLine] =
                 formatRecordCount(m_document.definition, original, dataRows.size());
-        m_document.declaredRecordCount = dataRows.size();
-    } else {
-        m_document.declaredRecordCount = -1;
+        hasCountLine = true;
     }
+
+    const int dataRecordLine = m_document.definition.dataRecordCountRow - 1;
+    if (dataRecordLine >= 0 && dataRecordLine < m_document.headerLines.size()
+        && dataRecordLine != recordLine) {
+        m_document.headerLines[dataRecordLine] = formatRecordCountPreservingPadding(
+                    m_document.headerLines.at(dataRecordLine), dataRows.size());
+        hasCountLine = true;
+    }
+    m_document.declaredRecordCount = hasCountLine
+            ? dataRows.size() : -1;
 
     // 保存后，记录数/空文件相关提示已经过时
     QStringList warnings;
@@ -934,6 +968,7 @@ bool TableModel::saveToFile(const QString& path, QString* error, int* droppedBla
     m_document.warnings = warnings;
 
     m_edits.clear();
+    m_hasRemovedRows = false;
 
     if (dropped > 0) {
         rebuildVisibleRows();
@@ -1081,6 +1116,7 @@ bool TableModel::saveDelimitedFile(const QString& path, QString* error,
     }
 
     m_edits.clear();
+    m_hasRemovedRows = false;
 
     if (dropped > 0) {
         rebuildVisibleRows();
@@ -1210,6 +1246,88 @@ bool TableModel::duplicateRows(const QVector<int>& visibleRows)
         m_visible.append(i);
 
     endInsertRows();
+
+    // 中间插入行后，后续行的“列表序号”需要重绘
+    if (!m_visible.isEmpty()) {
+        emit dataChanged(index(0, 0), index(m_visible.size() - 1, 0),
+                         QVector<int>() << Qt::DisplayRole);
+    }
+    return true;
+}
+
+bool TableModel::deleteRows(const QVector<int>& visibleRows)
+{
+    if (!m_hasDocument || visibleRows.isEmpty())
+        return false;
+
+    QSet<int> deleted;
+    for (int visibleRow : visibleRows) {
+        if (visibleRow >= 0 && visibleRow < m_visible.size())
+            deleted.insert(m_visible.at(visibleRow));
+    }
+    if (deleted.isEmpty())
+        return false;
+
+    const int oldCount = m_document.rowCount();
+    QVector<QByteArray> newRows;
+    QVector<QStringList> newValues;
+    QVector<int> newSources;
+    const int keptCount = oldCount - deleted.size();
+    newRows.reserve(keptCount);
+    newValues.reserve(keptCount);
+    newSources.reserve(keptCount);
+
+    QHash<int, int> remap;
+    remap.reserve(keptCount);
+
+    int nextRow = 0;
+    for (int row = 0; row < oldCount; ++row) {
+        if (deleted.contains(row))
+            continue;
+
+        if (m_document.isDelimited())
+            newValues.append(m_document.values.at(row));
+        else
+            newRows.append(m_document.rows.at(row));
+        newSources.append(m_document.sourceLines.value(row, -1));
+        remap.insert(row, nextRow++);
+    }
+
+    beginResetModel();
+
+    if (m_document.isDelimited())
+        m_document.values = newValues;
+    else
+        m_document.rows = newRows;
+    m_document.sourceLines = newSources;
+
+    QHash<quint64, QString> edits;
+    edits.reserve(m_edits.size());
+    for (auto it = m_edits.constBegin(); it != m_edits.constEnd(); ++it) {
+        const int oldRow = int(quint32(it.key() >> 32));
+        const auto mapped = remap.constFind(oldRow);
+        if (mapped != remap.constEnd()) {
+            edits.insert(editKey(mapped.value(), int(it.key() & 0xffffffffu)),
+                         it.value());
+        }
+    }
+    m_edits = edits;
+
+    for (QHash<int, QString>& values : m_extraValues) {
+        QHash<int, QString> remapped;
+        remapped.reserve(values.size());
+        for (auto it = values.constBegin(); it != values.constEnd(); ++it) {
+            const auto mapped = remap.constFind(it.key());
+            if (mapped != remap.constEnd())
+                remapped.insert(mapped.value(), it.value());
+        }
+        values = remapped;
+    }
+
+    m_visible.clear();
+    endResetModel();
+    m_hasRemovedRows = true;
+    rebuildVisibleRows();
     return true;
 }
 

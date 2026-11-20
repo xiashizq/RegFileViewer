@@ -182,6 +182,13 @@ void MainWindow::createActions()
     m_addRowAction->setShortcut(QKeySequence(Qt::CTRL + Qt::SHIFT + Qt::Key_N));
     connect(m_addRowAction, &QAction::triggered, this, &MainWindow::addBlankRow);
 
+    m_deleteRowAction = new QAction(QStringLiteral("删除选中行(&D)"), this);
+    m_deleteRowAction->setEnabled(false);
+    m_deleteRowAction->setShortcut(QKeySequence(Qt::CTRL + Qt::SHIFT + Qt::Key_Delete));
+    m_deleteRowAction->setToolTip(QStringLiteral("删除选中的行（Ctrl+Shift+Delete）"));
+    connect(m_deleteRowAction, &QAction::triggered,
+            this, &MainWindow::deleteSelectedRows);
+
     m_aboutAction = new QAction(QStringLiteral("关于(&A)..."), this);
     connect(m_aboutAction, &QAction::triggered, this, &MainWindow::showAbout);
 
@@ -241,8 +248,16 @@ void MainWindow::buildUi()
     m_filterEdit->setMaximumWidth(320);
     toolbar->addWidget(m_filterEdit);
 
+    auto* filterGap = new QWidget(this);
+    filterGap->setFixedWidth(12);
+    toolbar->addWidget(filterGap);
+
     m_regexBox = new QCheckBox(QStringLiteral("正则"), this);
     toolbar->addWidget(m_regexBox);
+
+    auto* optionGap = new QWidget(this);
+    optionGap->setFixedWidth(8);
+    toolbar->addWidget(optionGap);
 
     m_dictionaryBox = new QCheckBox(QStringLiteral("字典"), this);
     m_dictionaryBox->setChecked(true);
@@ -301,6 +316,7 @@ void MainWindow::buildUi()
     m_table->setTextElideMode(Qt::ElideRight);
     m_table->setCornerButtonEnabled(false);
     m_table->verticalHeader()->setDefaultSectionSize(22);
+    m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setDefaultSectionSize(130);
     m_table->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     m_table->horizontalHeader()->setHighlightSections(false);
@@ -435,6 +451,7 @@ void MainWindow::buildMenus()
     editMenu->addSeparator();
     editMenu->addAction(m_duplicateRowAction);
     editMenu->addAction(m_addRowAction);
+    editMenu->addAction(m_deleteRowAction);
 
     auto* viewMenu = menuBar()->addMenu(QStringLiteral("视图(&V)"));
     viewMenu->addAction(m_toggleInfoAction);
@@ -634,6 +651,7 @@ void MainWindow::setDocument(Document document)
     m_chooseAction->setToolTip(QString());
     m_duplicateRowAction->setEnabled(hasData);
     m_addRowAction->setEnabled(hasData);
+    m_deleteRowAction->setEnabled(hasData);
     m_saveAction->setEnabled(m_model->hasUnsavedChanges());
     m_saveAsAction->setEnabled(true);
 
@@ -657,6 +675,17 @@ void MainWindow::refreshDocumentViews()
 {
     if (!m_model->document())
         return;
+
+    const Document* doc = m_model->document();
+    const bool hasDocumentRows = doc->rowCount() > 0;
+    const bool hasVisibleRows = m_model->rowCount() > 0;
+    m_exportCsvAction->setEnabled(hasDocumentRows);
+    m_exportJsonAction->setEnabled(hasDocumentRows);
+    m_copyAction->setEnabled(hasDocumentRows);
+    m_selectAllAction->setEnabled(hasDocumentRows);
+    m_duplicateRowAction->setEnabled(hasVisibleRows);
+    m_deleteRowAction->setEnabled(hasVisibleRows);
+    m_addRowAction->setEnabled(true);
 
     fillInfoPanel();
     fillInfoBar();
@@ -1383,7 +1412,7 @@ void MainWindow::pasteRowsFromClipboard(const QByteArray& data)
     const int pasted = m_model->rowCount() - before;
     const int lastRow = m_model->rowCount() - 1;
     if (lastRow >= 0)
-        m_table->scrollTo(m_model->index(lastRow, 1), QAbstractItemView::EnsureVisible);
+        m_table->scrollTo(m_model->index(lastRow, 0), QAbstractItemView::EnsureVisible);
 
     refreshDocumentViews();
     m_saveAction->setEnabled(m_model->hasUnsavedChanges());
@@ -1548,6 +1577,9 @@ void MainWindow::showTableContextMenu(const QPoint& position)
 
     QAction* addAction = menu.addAction(QStringLiteral("在末尾添加空白行"));
 
+    QAction* deleteAction = menu.addAction(QStringLiteral("删除选中行"));
+    deleteAction->setEnabled(m_model->rowCount() > 0);
+
     QAction* chosen = menu.exec(m_table->viewport()->mapToGlobal(position));
     if (!chosen)
         return;
@@ -1573,6 +1605,8 @@ void MainWindow::showTableContextMenu(const QPoint& position)
         duplicateSelectedRows();
     } else if (chosen == addAction) {
         addBlankRow();
+    } else if (chosen == deleteAction) {
+        deleteSelectedRows();
     }
 }
 
@@ -1607,6 +1641,50 @@ void MainWindow::duplicateSelectedRows()
     statusBar()->showMessage(QStringLiteral("已复制 %1 行到下方").arg(rows.size()), 4000);
 }
 
+void MainWindow::deleteSelectedRows()
+{
+    if (!m_model->document() || m_model->rowCount() == 0)
+        return;
+
+    QVector<int> rows;
+    if (m_table->selectionModel()) {
+        const QModelIndexList selected = m_table->selectionModel()->selectedIndexes();
+        for (const QModelIndex& index : selected) {
+            if (index.isValid() && !rows.contains(index.row()))
+                rows.append(index.row());
+        }
+    }
+    if (rows.isEmpty()) {
+        const QModelIndex current = m_table->currentIndex();
+        if (current.isValid())
+            rows.append(current.row());
+    }
+    if (rows.isEmpty())
+        return;
+
+    const QMessageBox::StandardButton reply = QMessageBox::question(
+                this, QStringLiteral("删除选中行"),
+                QStringLiteral("确定删除选中的 %1 行吗？\n\n删除后需要保存才会写入文件。")
+                    .arg(rows.size()),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (reply != QMessageBox::Yes)
+        return;
+
+    const int firstRow = *std::min_element(rows.constBegin(), rows.constEnd());
+    if (!m_model->deleteRows(rows))
+        return;
+
+    if (m_model->rowCount() > 0) {
+        const int target = qBound(0, firstRow, m_model->rowCount() - 1);
+        m_table->selectRow(target);
+    }
+
+    refreshDocumentViews();
+    m_saveAction->setEnabled(m_model->hasUnsavedChanges());
+    statusBar()->showMessage(
+        QStringLiteral("已删除 %1 行，保存后写入文件").arg(rows.size()), 4000);
+}
+
 void MainWindow::addBlankRow()
 {
     if (!m_model->document())
@@ -1618,7 +1696,7 @@ void MainWindow::addBlankRow()
 
     const int lastRow = m_model->rowCount() - 1;
     if (lastRow >= 0)
-        m_table->scrollTo(m_model->index(lastRow, 1), QAbstractItemView::EnsureVisible);
+        m_table->scrollTo(m_model->index(lastRow, 0), QAbstractItemView::EnsureVisible);
 
     refreshDocumentViews();
     m_saveAction->setEnabled(m_model->hasUnsavedChanges());
@@ -1651,7 +1729,7 @@ void MainWindow::duplicateSelectedColumn()
         return;
 
     QString name;
-    if (!m_model->duplicateColumn(current.column(), &name))
+    if (!m_model->duplicateColumn(current.column() - 1, &name))
         return;
 
     autoSizeColumns();
@@ -1681,7 +1759,7 @@ void MainWindow::renameSelectedColumn()
     if (!ok || name.trimmed().isEmpty())
         return;
 
-    if (m_model->renameColumn(current.column(), name))
+    if (m_model->renameColumn(current.column() - 1, name))
         statusBar()->showMessage(QStringLiteral("列已重命名为“%1”").arg(name.trimmed()), 4000);
 }
 
@@ -1701,12 +1779,8 @@ void MainWindow::showCellInfo(const QModelIndex& index)
     if (!doc || !index.isValid())
         return;
 
-    if (index.column() == 0) {
-        QMessageBox::information(this, QStringLiteral("行信息"),
-            QStringLiteral("源文件行号：%1\n该行原始内容已显示在“文件头”页之外的表格中。")
-                .arg(doc->sourceLines.value(m_model->visibleRows().value(index.row()))));
+    if (index.column() == 0)
         return;
-    }
 
     const int fieldIndex = index.column() - 1;
     const int documentRow = m_model->visibleRows().value(index.row());

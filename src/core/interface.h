@@ -56,6 +56,7 @@ struct InterfaceDefinition
     int dataBeginRow = 0;        // 数据起始行（1 开始）
     int endIgnoreRows = 0;
     int rowCountCheckRow = 0;    // 记录数所在行（1 开始，0 表示无）
+    int dataRecordCountRow = 0;  // OFD 字段名后、数据前的记录数行（1 开始，0 表示无）
     int rowCountLength = 8;      // OFD 记录数字段宽度
     int fieldCountCheckRow = 0;  // 字段总数所在行
     int fieldDetailBeginRow = 0; // 字段明细起始行
