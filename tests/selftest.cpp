@@ -559,6 +559,19 @@ int main(int argc, char* argv[])
     ::_setmode(::_fileno(stdout), _O_BINARY);
 #endif
 
+    // 清理上次运行残留的临时文件：verifyMetadata 会把保存的文件重命名为
+    // 固定的新元数据文件名，目标已存在时按设计不覆盖，残留会让
+    // 连续运行两次自检时误报“保存后文件名未同步元数据”。
+    {
+        QDir staleDir(QDir::tempPath() + QStringLiteral("/rfv_selftest"));
+        if (staleDir.exists()) {
+            const QFileInfoList staleFiles =
+                    staleDir.entryInfoList(QDir::Files, QDir::Name);
+            for (const QFileInfo& entry : staleFiles)
+                QFile::remove(entry.absoluteFilePath());
+        }
+    }
+
     rfv::ConfigRepository repository;
     const QString confDir = rfv::ConfigRepository::locateConfDir();
 
@@ -578,6 +591,77 @@ int main(int argc, char* argv[])
         for (const QString& message : messages)
             printf("       %s\n", qUtf8Printable(message));
         return 2;
+    }
+
+    // 回归检查：N 字段值自带小数点时不产生双小数点
+    {
+        rfv::FieldDefinition numericField;
+        numericField.type = QLatin1Char('N');
+        numericField.length = 16;
+        numericField.decimals = 2;
+
+        struct Sample { const char* raw; const char* expected; };
+        const Sample samples[] = {
+            { "123.45",  "123.45" },
+            { "0001.50", "1.50"   },
+            { ".5",      "0.5"    },
+            { "-001.5",  "-1.5"   },
+        };
+        bool ok = true;
+        for (const Sample& sample : samples) {
+            const QString actual = rfv::formatFieldValue(QString::fromLatin1(sample.raw),
+                                                         numericField);
+            if (actual != QString::fromLatin1(sample.expected)) {
+                printf("[FAIL] formatFieldValue(%s) = %s，期望 %s\n", sample.raw,
+                       qUtf8Printable(actual), sample.expected);
+                ok = false;
+            }
+        }
+        if (ok)
+            printf("[ OK ] formatFieldValue：带小数点的 N 字段值规范化正确\n");
+        else
+            return 2;
+    }
+
+    // 回归检查：分隔符文件中列数多于表头的行要给出诊断提示（不再静默截断）
+    {
+        const QDir scratch(QDir::tempPath() + QStringLiteral("/rfv_selftest"));
+        if (!scratch.exists() && !scratch.mkpath(QStringLiteral(".")))
+            return 2;
+        const QString path = scratch.filePath(QStringLiteral("_extra_columns.txt"));
+        {
+            QFile file(path);
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                printf("[FAIL] 无法创建多余列测试文件：%s\n", qUtf8Printable(path));
+                return 2;
+            }
+            file.write(QStringLiteral(
+                    "元数据行\n"
+                    "序号|名称|金额\n"
+                    "1|张三|100\n"
+                    "2|李四|200|备注\n")
+                    .toUtf8());
+        }
+
+        rfv::Document document;
+        QString error;
+        if (!rfv::FileParser::parseDelimited(path, document, &error)) {
+            printf("[FAIL] 多余列测试解析失败：%s\n", qUtf8Printable(error));
+            return 2;
+        }
+        QFile::remove(path);
+
+        bool warned = false;
+        for (const QString& warning : document.warnings) {
+            if (warning.contains(QStringLiteral("多于表头")))
+                warned = true;
+        }
+        if (document.rowCount() != 2 || !warned) {
+            printf("[FAIL] 列数多于表头时诊断提示缺失（行数=%d，提示数=%d）\n",
+                   document.rowCount(), document.warnings.size());
+            return 2;
+        }
+        printf("[ OK ] parseDelimited：列数多于表头时输出诊断提示\n");
     }
 
     printf("conf     : %s\n", qUtf8Printable(confDir));

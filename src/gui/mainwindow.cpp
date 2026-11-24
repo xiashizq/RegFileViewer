@@ -420,10 +420,17 @@ void MainWindow::buildUi()
         if (index.isValid() && index.column() == 0)
             m_table->selectRow(index.row());
     });
+
+    // 数据概况页全量重建较重，批量粘贴/连续编辑时用防抖合并刷新
+    m_overviewTimer = new QTimer(this);
+    m_overviewTimer->setSingleShot(true);
+    m_overviewTimer->setInterval(150);
+    connect(m_overviewTimer, &QTimer::timeout, this, &MainWindow::fillOverviewTab);
+
     connect(m_model, &QAbstractItemModel::dataChanged, this, [this]() {
-        fillOverviewTab();
         if (m_saveAction)
             m_saveAction->setEnabled(m_model->hasUnsavedChanges());
+        m_overviewTimer->start();
     });
     connect(m_infoPanel, &InfoPanel::diagnosticsRequested, this, [this]() {
         m_tabs->setCurrentWidget(m_diagnosticsView);
@@ -1693,30 +1700,40 @@ void MainWindow::duplicateSelectedRows()
     if (!m_model->document() || m_model->rowCount() == 0)
         return;
 
-    resetFilterForRowEdit();
-
-    QVector<int> rows;
+    // 先把选中行映射为文档行号，再清除筛选。
+    // 清除筛选会重置模型并清空视图选区，之后就无法还原用户选中了哪些行。
+    const QVector<int>& visible = m_model->visibleRows();
+    QVector<int> documentRows;
     if (m_table->selectionModel()) {
         const QModelIndexList selected = m_table->selectionModel()->selectedIndexes();
         for (const QModelIndex& index : selected) {
-            if (index.isValid() && !rows.contains(index.row()))
-                rows.append(index.row());
+            if (!index.isValid())
+                continue;
+            const int documentRow = visible.value(index.row(), -1);
+            if (documentRow >= 0 && !documentRows.contains(documentRow))
+                documentRows.append(documentRow);
         }
     }
-    if (rows.isEmpty()) {
+    if (documentRows.isEmpty()) {
         const QModelIndex current = m_table->currentIndex();
         if (current.isValid())
-            rows.append(current.row());
+            documentRows.append(visible.value(current.row(), -1));
     }
-    if (rows.isEmpty())
+    documentRows.removeAll(-1);
+    if (documentRows.isEmpty())
         return;
 
-    if (!m_model->duplicateRows(rows))
+    const int selectedCount = documentRows.size();
+
+    // 清除筛选后可见行与文档行一一对应，可按文档行直接复制
+    resetFilterForRowEdit();
+
+    if (!m_model->duplicateRows(documentRows))
         return;
 
     refreshDocumentViews();
     m_saveAction->setEnabled(m_model->hasUnsavedChanges());
-    statusBar()->showMessage(QStringLiteral("已复制 %1 行到下方").arg(rows.size()), 4000);
+    statusBar()->showMessage(QStringLiteral("已复制 %1 行到下方").arg(selectedCount), 4000);
 }
 
 void MainWindow::deleteSelectedRows()

@@ -570,6 +570,8 @@ bool rfv::FileParser::parseDelimited(const QString& path, Document& document, QS
     out.headerLines.append(out.headerRaw);
 
     const int fieldCount = headerFields.size();
+    int truncatedLines = 0;
+    int firstTruncatedLine = 0;
     for (int i = headerIndex + 1; i < lines.size(); ++i) {
         const QString line = lines.at(i);
         if (line.isEmpty())
@@ -581,11 +583,23 @@ bool rfv::FileParser::parseDelimited(const QString& path, Document& document, QS
             out.tailLines.append(line);
             continue;
         }
-        if (fields.size() > fieldCount)
+        if (fields.size() > fieldCount) {
+            // 多出的列解析时丢弃、保存时也不会写回，必须给出诊断提示避免数据无感丢失
+            if (truncatedLines == 0)
+                firstTruncatedLine = i + 1;
+            ++truncatedLines;
             fields = fields.mid(0, fieldCount);
+        }
 
         out.values.append(fields);
         out.sourceLines.append(i + 1);
+    }
+
+    if (truncatedLines > 0) {
+        out.warnings.append(QStringLiteral(
+            "有 %1 行的列数多于表头的 %2 列，超出部分已忽略"
+            "（首个在第 %3 行，保存后超出内容会丢失）")
+            .arg(truncatedLines).arg(fieldCount).arg(firstTruncatedLine));
     }
 
     if (out.values.isEmpty())

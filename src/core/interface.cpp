@@ -45,6 +45,24 @@ QString formatFieldValue(const QString& raw, const FieldDefinition& field)
         value.remove(0, 1);
     }
 
+    // 文件里已带小数点的数值（历史数据或非标准接口）：
+    // 不再按配置小数位硬切位置，避免产生 "1.23.45" 这类双小数点
+    const int existingDot = value.indexOf(QLatin1Char('.'));
+    if (existingDot >= 0) {
+        QString integerPart = value.left(existingDot);
+        const QString fractionPart = value.mid(existingDot + 1);
+        int pos = 0;
+        while (pos < integerPart.size() - 1 && integerPart.at(pos) == QLatin1Char('0'))
+            ++pos;
+        integerPart = integerPart.mid(pos);
+        if (integerPart.isEmpty())
+            integerPart = QStringLiteral("0");
+        value = fractionPart.isEmpty()
+                ? integerPart
+                : integerPart + QLatin1Char('.') + fractionPart;
+        return negative ? QLatin1Char('-') + value : value;
+    }
+
     if (field.decimals <= 0) {
         int pos = 0;
         while (pos < value.size() - 1 && value.at(pos) == QLatin1Char('0'))

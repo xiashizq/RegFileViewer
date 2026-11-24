@@ -114,6 +114,7 @@ private:
     QCheckBox* m_regexBox = nullptr;
     QCheckBox* m_dictionaryBox = nullptr;
     QTimer* m_filterTimer = nullptr;
+    QTimer* m_overviewTimer = nullptr;
 
     QLabel* m_statusLabel = nullptr;
     QLabel* m_statusFileLabel = nullptr;
