@@ -50,6 +50,7 @@ private:
     void setDocument(Document document);
     void fillInfoPanel();
     void fillInfoBar();
+    void metaInfoEdited();
     void fillHeaderTab();
     void fillFieldsTab();
     void fillDiagnosticsTab();

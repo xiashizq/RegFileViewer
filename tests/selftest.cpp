@@ -330,6 +330,22 @@ bool verifyDelete(const rfv::Document& document, const QString& baseName)
         return false;
     }
 
+    // 删除行后，内存文件头中的记录数统计行必须立即同步
+    if (!document.definition.isDelimited()) {
+        const int recordRow = document.definition.isOfd()
+                ? 6 : document.definition.rowCountCheckRow;
+        if (recordRow > 0 && recordRow <= model.document()->headerLines.size()) {
+            bool ok = false;
+            const int value = model.document()->headerLines.at(recordRow - 1)
+                    .trimmed().toInt(&ok);
+            if (!ok || value != model.rowCount()) {
+                printf("       [FAIL] 删除行后内存统计行未同步：%d != %d\n",
+                       value, model.rowCount());
+                return false;
+            }
+        }
+    }
+
     if (!document.definition.isDelimited()) {
         QFile file(path);
         if (!file.open(QIODevice::ReadOnly)) {
@@ -369,6 +385,96 @@ bool verifyDelete(const rfv::Document& document, const QString& baseName)
     }
 
     printf("       [ OK ] 删除行 / 行数与统计值同步 -> %s\n", qUtf8Printable(path));
+    return true;
+}
+
+/// 修改发送方/接收方/文件日期后保存：OFD 写回报文头，全部格式同步重命名文件。
+bool verifyMetadata(const rfv::Document& document, const QString& baseName)
+{
+    if (document.rowCount() == 0)
+        return true;
+
+    QDir dir(QDir::tempPath() + QStringLiteral("/rfv_selftest"));
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+        printf("       [FAIL] 无法创建临时元数据测试目录\n");
+        return false;
+    }
+
+    QString suffix = QFileInfo(document.filePath).suffix();
+    if (!suffix.isEmpty())
+        suffix.prepend(QLatin1Char('.'));
+    const QString path = dir.filePath(baseName + QStringLiteral("_meta") + suffix);
+
+    rfv::TableModel model;
+    model.setDocument(document);
+
+    const bool delimited = document.isDelimited();
+    model.setHeaderMetadata(QStringLiteral("NEWSEND"),
+                            delimited ? QString() : QStringLiteral("NEWRCVR"),
+                            QStringLiteral("20261231"));
+    if (!model.hasUnsavedChanges()) {
+        printf("       [FAIL] 修改元数据后未标记为未保存\n");
+        return false;
+    }
+
+    QString error;
+    if (!model.saveToFile(path, &error)) {
+        printf("       [FAIL] 元数据保存失败：%s\n", qUtf8Printable(error));
+        return false;
+    }
+    if (model.hasUnsavedChanges()) {
+        printf("       [FAIL] 元数据保存后仍标记为未保存\n");
+        return false;
+    }
+
+    // 文件名符合四段结构时，保存后应按新元数据重命名，且其余段保持不变
+    const QChar separator = delimited ? QLatin1Char('_') : QLatin1Char('-');
+    const bool renameable = baseName.split(separator).size() >= 4;
+    const QString finalPath = model.document()->filePath;
+    if (renameable) {
+        const QStringList parts = QFileInfo(finalPath).completeBaseName().split(separator);
+        if (parts.size() < 4 || parts.at(0) != QStringLiteral("NEWSEND")
+            || parts.at(3) != QStringLiteral("20261231")
+            || (!delimited && parts.at(1) != QStringLiteral("NEWRCVR"))) {
+            printf("       [FAIL] 保存后文件名未同步元数据：%s\n",
+                   qUtf8Printable(QFileInfo(finalPath).fileName()));
+            return false;
+        }
+    }
+
+    rfv::Document reloaded;
+    if (delimited) {
+        if (!rfv::FileParser::parseDelimited(finalPath, reloaded, &error)) {
+            printf("       [FAIL] 重命名后重新解析失败：%s\n", qUtf8Printable(error));
+            return false;
+        }
+    } else if (!rfv::FileParser::parse(finalPath, document.definition,
+                                       reloaded, &error)) {
+        printf("       [FAIL] 重命名后重新解析失败：%s\n", qUtf8Printable(error));
+        return false;
+    }
+
+    if (reloaded.senderCode != QStringLiteral("NEWSEND")
+        || reloaded.fileDate != QStringLiteral("20261231")
+        || (!delimited && reloaded.receiverCode != QStringLiteral("NEWRCVR"))) {
+        printf("       [FAIL] 重新解析后的发送方/接收方/日期不正确：%s / %s / %s\n",
+               qUtf8Printable(reloaded.senderCode), qUtf8Printable(reloaded.receiverCode),
+               qUtf8Printable(reloaded.fileDate));
+        return false;
+    }
+
+    // OFD：报文头第 3/4/5 行应写入新值
+    if (document.definition.isOfd()
+        && (reloaded.headerLines.size() < 5
+            || reloaded.headerLines.at(2).trimmed() != QStringLiteral("NEWSEND")
+            || reloaded.headerLines.at(3).trimmed() != QStringLiteral("NEWRCVR")
+            || reloaded.headerLines.at(4).trimmed() != QStringLiteral("20261231"))) {
+        printf("       [FAIL] 报文头的发送方/接收方/日期未写回\n");
+        return false;
+    }
+
+    printf("       [ OK ] 元数据编辑 / 报文头写回与文件重命名 -> %s\n",
+           qUtf8Printable(finalPath));
     return true;
 }
 
@@ -435,10 +541,11 @@ bool runFile(rfv::ConfigRepository& repository, const QString& path)
     const bool saveOk = verifySave(document, model, baseName);
     const bool exportOk = verifyExport(document, model, baseName);
     const bool deleteOk = verifyDelete(document, baseName);
+    const bool metaOk = verifyMetadata(document, baseName);
 
     printf("\n");
     return document.rowCount() > 0 && document.warnings.isEmpty()
-            && modelOk && saveOk && exportOk && deleteOk;
+            && modelOk && saveOk && exportOk && deleteOk && metaOk;
 }
 
 } // namespace

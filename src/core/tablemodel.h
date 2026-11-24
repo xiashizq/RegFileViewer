@@ -79,6 +79,11 @@ public:
     bool saveToFile(const QString& path, QString* error = nullptr,
                     int* droppedBlankRows = nullptr);
 
+    /// 修改发送方/接收方/文件日期：OFD 写入报文头第 3/4/5 行，
+    /// 内部清算与定长文件通过保存时的文件重命名生效
+    void setHeaderMetadata(const QString& sender, const QString& receiver,
+                           const QString& date);
+
     /// 在末尾添加一个空白行
     bool appendBlankRow();
 
@@ -99,6 +104,9 @@ public:
 
 private:
     void rebuildVisibleRows();
+    void updateCountLines();
+    QString metadataTargetPath(const QString& path) const;
+    QString renameForMetadata(const QString& writtenPath) const;
     QString fieldHeaderText(const FieldDefinition& field) const;
     bool applyFieldEdit(QByteArray& row, int fieldIndex, const QString& value,
                         QString* error) const;
@@ -120,6 +128,7 @@ private:
     QVector<QHash<int, QString>> m_extraValues; // 每个新增列：Document 行 -> 值
     QHash<quint64, QString> m_edits;            // 接口字段的编辑结果
     bool m_hasRemovedRows = false;              // 是否删除过行，删除也需要写回
+    bool m_metaChanged = false;                 // 发送方/接收方/文件日期是否被修改
 };
 
 /// 整行复制使用的自定义剪贴板 MIME 类型

@@ -305,6 +305,12 @@ void MainWindow::buildUi()
     addInfoField(QStringLiteral("发送方"), &m_senderEdit, 90, 1);
     addInfoField(QStringLiteral("接收方"), &m_receiverEdit, 90, 1);
     addInfoField(QStringLiteral("文件日期"), &m_dateEdit, 84, 0);
+
+    // 发送方/接收方/文件日期支持编辑：OFD 写回报文头，其余格式在保存时同步文件名
+    for (QLineEdit* edit : {m_senderEdit, m_receiverEdit, m_dateEdit}) {
+        connect(edit, &QLineEdit::editingFinished,
+                this, &MainWindow::metaInfoEdited);
+    }
     dataLayout->addWidget(infoBar);
 
     m_table = new QTableView(dataPage);
@@ -700,6 +706,50 @@ void MainWindow::fillInfoPanel()
     m_infoPanel->setDocument(m_model->document(), m_repository);
 }
 
+void MainWindow::metaInfoEdited()
+{
+    auto* edit = qobject_cast<QLineEdit*>(sender());
+    if (!edit || edit->isReadOnly() || !m_model->document())
+        return;
+
+    QString sender = m_senderEdit->text().trimmed();
+    QString receiver = m_receiverEdit->text().trimmed();
+    QString date = m_dateEdit->text().trimmed();
+
+    // 占位符号与空值视为“清除该值”
+    const auto normalize = [](QString& value) {
+        if (value == QStringLiteral("-"))
+            value.clear();
+    };
+    normalize(sender);
+    normalize(receiver);
+    normalize(date);
+
+    // 文件日期参与文件名与报文头校验，必须是 8 位数字
+    if (!date.isEmpty() && (date.size() != 8
+                            || std::any_of(date.cbegin(), date.cend(),
+                                           [](QChar ch) { return !ch.isDigit(); }))) {
+        statusBar()->showMessage(
+            QStringLiteral("文件日期必须是 8 位数字（例如 20261118）"), 5000);
+        fillInfoBar();
+        return;
+    }
+
+    const Document* doc = m_model->document();
+    if (sender == doc->senderCode && receiver == doc->receiverCode
+        && date == doc->fileDate)
+        return;
+
+    m_model->setHeaderMetadata(sender, receiver, date);
+
+    fillInfoBar();
+    fillHeaderTab();
+    fillInfoPanel();
+    m_saveAction->setEnabled(m_model->hasUnsavedChanges());
+    statusBar()->showMessage(
+        QStringLiteral("发送方/接收方/文件日期已修改，保存后写入文件并同步文件名"), 6000);
+}
+
 void MainWindow::fillInfoBar()
 {
     const Document* doc = m_model->document();
@@ -710,6 +760,7 @@ void MainWindow::fillInfoBar()
             if (!edit)
                 continue;
             edit->clear();
+            edit->setReadOnly(true);
             edit->setToolTip(QString());
         }
         return;
@@ -720,18 +771,9 @@ void MainWindow::fillInfoBar()
     m_interfaceEdit->setToolTip(definition.describe);
 
     QString fileType;
-    QString sender;
-    QString receiver;
-    QString date;
-
     if (definition.layout == Layout::Delimited) {
         fileType = definition.fileType;
-        sender = doc->senderCode;
-        date = doc->fileDate;
     } else if (definition.isOfd() && doc->headerLines.size() >= 7) {
-        sender = doc->headerLines.at(2).trimmed();
-        receiver = doc->headerLines.at(3).trimmed();
-        date = doc->headerLines.at(4).trimmed();
         fileType = doc->headerLines.at(6).trimmed();
     } else {
         const QRegularExpression pattern(QStringLiteral("(?:^|[-_])(\\d{3})(?:[-_.]|$)"));
@@ -739,7 +781,10 @@ void MainWindow::fillInfoBar()
         if (match.hasMatch())
             fileType = match.captured(1);
     }
+    m_fileTypeEdit->setText(fileType.isEmpty() ? QStringLiteral("-") : fileType);
 
+    // 发送方/接收方/文件日期显示原始代码（机构名称放到提示里），支持编辑：
+    // OFD 保存时写回报文头第 3/4/5 行；其余格式保存时同步重命名文件。
     const auto describeCode = [this](const QString& code) {
         if (code.isEmpty())
             return QString();
@@ -747,15 +792,38 @@ void MainWindow::fillInfoBar()
         return name.isEmpty() ? code : QStringLiteral("%1 · %2").arg(code, name);
     };
 
-    const QString senderText = describeCode(sender);
-    const QString receiverText = describeCode(receiver);
+    const QString editableTip = QStringLiteral("（可直接修改，保存后写入文件）");
 
-    m_fileTypeEdit->setText(fileType.isEmpty() ? QStringLiteral("-") : fileType);
-    m_senderEdit->setText(senderText.isEmpty() ? QStringLiteral("-") : senderText);
-    m_senderEdit->setToolTip(senderText);
-    m_receiverEdit->setText(receiverText.isEmpty() ? QStringLiteral("-") : receiverText);
-    m_receiverEdit->setToolTip(receiverText);
-    m_dateEdit->setText(date.isEmpty() ? QStringLiteral("-") : date);
+    // 文件名四段结构（发送方-接收方-类型-日期 / 机构_类型_业务_日期）决定
+    // 内部清算与定长文件能否通过重命名保存这些值
+    const QChar nameSeparator = definition.isDelimited() ? QLatin1Char('_') : QLatin1Char('-');
+    const bool nameSupportsMeta =
+            QFileInfo(doc->filePath).completeBaseName().split(nameSeparator).size() >= 4;
+
+    const bool senderEditable = definition.isOfd() || nameSupportsMeta;
+    m_senderEdit->setReadOnly(!senderEditable);
+    m_senderEdit->setText(doc->senderCode);
+    m_senderEdit->setToolTip(describeCode(doc->senderCode)
+                             + (senderEditable ? editableTip : QString()));
+
+    // 内部清算文件正文与文件名都没有接收方，不支持修改
+    const bool receiverEditable = !definition.isDelimited()
+            && (definition.isOfd() || nameSupportsMeta);
+    m_receiverEdit->setReadOnly(!receiverEditable);
+    if (definition.isDelimited()) {
+        m_receiverEdit->setText(QStringLiteral("-"));
+        m_receiverEdit->setToolTip(QStringLiteral("该文件格式没有接收方信息"));
+    } else {
+        m_receiverEdit->setText(doc->receiverCode);
+        m_receiverEdit->setToolTip(describeCode(doc->receiverCode)
+                                   + (receiverEditable ? editableTip : QString()));
+    }
+
+    const bool dateEditable = definition.isOfd() || nameSupportsMeta;
+    m_dateEdit->setReadOnly(!dateEditable);
+    m_dateEdit->setText(doc->fileDate);
+    m_dateEdit->setToolTip(doc->fileDate.isEmpty()
+                           ? QString() : doc->fileDate + (dateEditable ? editableTip : QString()));
 }
 
 void MainWindow::fillOverviewTab()
@@ -1228,6 +1296,15 @@ void MainWindow::saveDocument()
 
     m_saveAction->setEnabled(false);
     refreshDocumentViews();
+
+    // 修改过发送方/接收方/文件日期时，保存会把文件重命名为新元数据对应的文件名
+    if (m_currentFilePath != doc->filePath) {
+        m_currentFilePath = doc->filePath;
+        addRecentFile(m_currentFilePath);
+        setWindowTitle(QStringLiteral("%1 - RegFileViewer")
+                       .arg(QFileInfo(doc->filePath).fileName()));
+    }
+
     statusBar()->showMessage(QStringLiteral("已保存到 %1").arg(doc->filePath), 6000);
 
     if (m_model->hasExtraColumnValues()) {
@@ -1262,7 +1339,8 @@ void MainWindow::saveDocumentAs()
         return;
     }
 
-    m_currentFilePath = QFileInfo(path).absoluteFilePath();
+    // 元数据被修改时保存会把文件重命名，以模型中的最终路径为准
+    m_currentFilePath = doc->filePath;
     addRecentFile(m_currentFilePath);
     setWindowTitle(QStringLiteral("%1 - RegFileViewer")
                    .arg(QFileInfo(m_currentFilePath).fileName()));

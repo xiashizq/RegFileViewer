@@ -50,6 +50,7 @@ public:
     bool endsWithNewline = true;
     bool hasBom = false;
     QString senderCode;
+    QString receiverCode;
     QString fileDate;
 
     int declaredRecordCount = -1;

@@ -3,8 +3,9 @@
 #include "core/encoding.h"
 
 #include <QColor>
-#include <QFile>
 #include <QDataStream>
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -178,18 +179,16 @@ QString formatRecordCountPreservingPadding(const QString& original, int count)
 }
 
 /// 分隔符文件另存为后，文件名就是文件类型/发送方/日期等信息来源，需要同步更新。
+/// 文件名不满足“机构_类型_业务_日期”四段结构时保留原值（可能来自用户编辑），不覆盖。
 void updateDelimitedMetadata(Document& document, const QString& path)
 {
     const QFileInfo info(path);
     document.filePath = info.absoluteFilePath();
-    document.senderCode.clear();
-    document.fileDate.clear();
 
     InterfaceDefinition& definition = document.definition;
     definition.configFile = info.fileName();
     definition.section = info.fileName();
     definition.describe = info.completeBaseName();
-    definition.fileType.clear();
 
     const QStringList parts = info.completeBaseName().split(QLatin1Char('_'));
     if (parts.size() >= 4) {
@@ -206,6 +205,7 @@ void updateDelimitedMetadata(Document& document, const QString& path)
 bool rebuildFile(const QString& sourcePath, const QString& targetPath,
                  const QVector<QByteArray>& dataRows,
                  const InterfaceDefinition& definition,
+                 const QHash<int, QByteArray>* headerOverrides,
                  int* firstDataLine, QString* error)
 {
     QFile input(sourcePath);
@@ -265,7 +265,11 @@ bool rebuildFile(const QString& sourcePath, const QString& targetPath,
 
     QByteArray output = bom;
     for (int i = 0; i < headerCount; ++i) {
-        output += lines.at(i).content;
+        // 报文头行默认取自源文件；被修改过的行（如发送方/接收方/文件日期）用编辑后的内容
+        QByteArray content = lines.at(i).content;
+        if (headerOverrides && headerOverrides->contains(i))
+            content = headerOverrides->value(i);
+        output += content;
         output += lines.at(i).ending.isEmpty() ? dataEnding : lines.at(i).ending;
     }
 
@@ -318,6 +322,7 @@ void TableModel::setDocument(Document document)
     m_extraValues.clear();
     m_edits.clear();
     m_hasRemovedRows = false;
+    m_metaChanged = false;
     endResetModel();
     rebuildVisibleRows();
 }
@@ -332,8 +337,128 @@ void TableModel::clear()
     m_extraValues.clear();
     m_edits.clear();
     m_hasRemovedRows = false;
+    m_metaChanged = false;
     endResetModel();
 }
+
+void TableModel::setHeaderMetadata(const QString& sender, const QString& receiver,
+                                   const QString& date)
+{
+    if (!m_hasDocument)
+        return;
+
+    Document& doc = m_document;
+    const bool changed = doc.senderCode != sender || doc.receiverCode != receiver
+            || doc.fileDate != date;
+    if (!changed)
+        return;
+
+    doc.senderCode = sender;
+    doc.receiverCode = receiver;
+    doc.fileDate = date;
+    m_metaChanged = true;
+
+    // OFD 报文头第 3/4/5 行是发送方/接收方/文件日期，
+    // 修改后立即同步到内存文件头，保存时写入文件并重命名为新元数据对应的文件名。
+    // 短于原行的值按原行宽补空格，保持报文头列宽不变。
+    if (doc.definition.layout == Layout::Ofd && doc.headerLines.size() >= 5) {
+        auto writeHeaderLine = [&doc](int row, const QString& value) {
+            QString text = value.trimmed();
+            const int originalWidth = doc.headerLines.at(row).size();
+            if (text.size() < originalWidth)
+                text = text.leftJustified(originalWidth, QLatin1Char(' '));
+            doc.headerLines[row] = text;
+        };
+        writeHeaderLine(2, sender);
+        writeHeaderLine(3, receiver);
+        writeHeaderLine(4, date);
+    }
+}
+
+/// 行数变化后，立即把记录数统计行的值同步到内存文件头，
+/// “文件头”页与“数据概况”的“声明 X”即时刷新；保存时再写回文件。
+void TableModel::updateCountLines()
+{
+    if (!m_hasDocument || m_document.isDelimited())
+        return;
+
+    QStringList& header = m_document.headerLines;
+    if (header.isEmpty())
+        return;
+
+    const InterfaceDefinition& definition = m_document.definition;
+    const int rowCount = m_document.rowCount();
+    bool updated = false;
+
+    // OFD 报文头第 6 行；定长文件为 rowcountcheckrow 指定的
+    // “字段名之后、数据之前”的统计行
+    const int recordRow = definition.isOfd() ? 6 : definition.rowCountCheckRow;
+    if (recordRow > 0 && recordRow <= header.size()) {
+        header[recordRow - 1] = formatRecordCount(
+                    definition, header.at(recordRow - 1).toLatin1(), rowCount);
+        updated = true;
+    }
+
+    // OFD 字段名之后、数据之前的记录数行（例如 00035397）
+    const int dataRecordRow = definition.dataRecordCountRow;
+    if (definition.isOfd() && dataRecordRow > 0 && dataRecordRow != recordRow
+        && dataRecordRow <= header.size()) {
+        header[dataRecordRow - 1] = formatRecordCountPreservingPadding(
+                    header.at(dataRecordRow - 1), rowCount);
+        updated = true;
+    }
+
+    if (updated)
+        m_document.declaredRecordCount = rowCount;
+}
+
+/// 元数据被修改后，按当前发送方/接收方/文件日期推导保存时应使用的文件名。
+/// 文件名需符合“发送方-接收方-类型-日期”（OFD/定长）或
+/// “机构_类型_业务_日期”（内部清算）的四段结构，识别不了时返回空表示不改名。
+QString TableModel::metadataTargetPath(const QString& path) const
+{
+    const QFileInfo info(path);
+    const bool delimited = m_document.isDelimited();
+    const QChar separator = delimited ? QLatin1Char('_') : QLatin1Char('-');
+
+    QStringList parts = info.completeBaseName().split(separator);
+    if (parts.size() < 4)
+        return QString();
+
+    // 新值里不能出现文件名分隔符，否则文件名结构会被破坏
+    const auto containsSeparator = [&separator](const QString& value) {
+        return value.contains(separator) || value.contains(QLatin1Char('_'))
+                || value.contains(QLatin1Char('-'));
+    };
+    if (containsSeparator(m_document.senderCode)
+        || (!delimited && containsSeparator(m_document.receiverCode))
+        || containsSeparator(m_document.fileDate))
+        return QString();
+
+    if (!m_document.senderCode.isEmpty())
+        parts[0] = m_document.senderCode;
+    if (!delimited && !m_document.receiverCode.isEmpty())
+        parts[1] = m_document.receiverCode;
+    if (m_document.fileDate.size() == 8)
+        parts[3] = m_document.fileDate;
+
+    const QString suffix = info.suffix().isEmpty()
+            ? QString() : QStringLiteral(".") + info.suffix();
+    return info.dir().filePath(parts.join(separator) + suffix);
+}
+
+/// 把刚写好的文件重命名为元数据对应的文件名。
+/// 目标文件名已存在时保持原文件名，避免覆盖已有文件。
+QString TableModel::renameForMetadata(const QString& writtenPath) const
+{
+    const QString target = metadataTargetPath(writtenPath);
+    if (target.isEmpty() || target == writtenPath)
+        return writtenPath;
+    if (QFileInfo::exists(target))
+        return writtenPath;
+    return QFile::rename(writtenPath, target) ? target : writtenPath;
+}
+
 
 int TableModel::rowCount(const QModelIndex& parent) const
 {
@@ -837,7 +962,8 @@ bool TableModel::hasUnsavedChanges() const
 {
     if (!m_hasDocument)
         return false;
-    return !m_edits.isEmpty() || addedRowCount() > 0 || m_hasRemovedRows;
+    return !m_edits.isEmpty() || addedRowCount() > 0 || m_hasRemovedRows
+            || m_metaChanged;
 }
 
 int TableModel::addedRowCount() const
@@ -905,8 +1031,18 @@ bool TableModel::saveToFile(const QString& path, QString* error, int* droppedBla
     dataRows = keptRows;
 
     int firstDataLine = 0;
+
+    // OFD 报文头第 3/4/5 行（发送方/接收方/文件日期）被修改过时写入保存的文件
+    QHash<int, QByteArray> headerOverrides;
+    if (m_document.definition.isOfd() && m_metaChanged
+        && m_document.headerLines.size() >= 5) {
+        for (int row : {2, 3, 4})
+            headerOverrides.insert(row, encodeText(m_document.headerLines.at(row),
+                                                   m_document.definition.encoding));
+    }
+
     if (!rebuildFile(m_document.filePath, path, dataRows, m_document.definition,
-                     &firstDataLine, error)) {
+                     &headerOverrides, &firstDataLine, error)) {
         return false;
     }
 
@@ -931,6 +1067,10 @@ bool TableModel::saveToFile(const QString& path, QString* error, int* droppedBla
         m_document.sourceLines.append(firstDataLine + i);
 
     m_document.filePath = QFileInfo(path).absoluteFilePath();
+
+    // 修改过发送方/接收方/文件日期时，按新元数据同步重命名文件
+    if (m_metaChanged)
+        m_document.filePath = renameForMetadata(m_document.filePath);
 
     // 文件中的记录数已经更新，同步内存中的声明值和文件头显示
     bool hasCountLine = false;
@@ -969,6 +1109,7 @@ bool TableModel::saveToFile(const QString& path, QString* error, int* droppedBla
 
     m_edits.clear();
     m_hasRemovedRows = false;
+    m_metaChanged = false;
 
     if (dropped > 0) {
         rebuildVisibleRows();
@@ -1102,7 +1243,12 @@ bool TableModel::saveDelimitedFile(const QString& path, QString* error,
     for (int i = 0; i < values.size(); ++i)
         m_document.sourceLines.append(definition.dataBeginRow + i);
 
-    updateDelimitedMetadata(m_document, path);
+    // 修改过发送方/文件日期时，先把文件重命名为新元数据对应的文件名，
+    // 再从最终文件名同步元数据，保证编辑值不丢失
+    QString finalPath = QFileInfo(path).absoluteFilePath();
+    if (m_metaChanged)
+        finalPath = renameForMetadata(finalPath);
+    updateDelimitedMetadata(m_document, finalPath);
 
     if (!values.isEmpty()) {
         QStringList warnings;
@@ -1117,6 +1263,7 @@ bool TableModel::saveDelimitedFile(const QString& path, QString* error,
 
     m_edits.clear();
     m_hasRemovedRows = false;
+    m_metaChanged = false;
 
     if (dropped > 0) {
         rebuildVisibleRows();
@@ -1160,6 +1307,7 @@ bool TableModel::appendBlankRow()
     m_document.sourceLines.append(-1);
     m_visible.append(insertAt);
     endInsertRows();
+    updateCountLines();
     return true;
 }
 
@@ -1252,6 +1400,7 @@ bool TableModel::duplicateRows(const QVector<int>& visibleRows)
         emit dataChanged(index(0, 0), index(m_visible.size() - 1, 0),
                          QVector<int>() << Qt::DisplayRole);
     }
+    updateCountLines();
     return true;
 }
 
@@ -1328,6 +1477,7 @@ bool TableModel::deleteRows(const QVector<int>& visibleRows)
     endResetModel();
     m_hasRemovedRows = true;
     rebuildVisibleRows();
+    updateCountLines();
     return true;
 }
 
@@ -1555,6 +1705,7 @@ bool TableModel::appendRows(const QVector<QByteArray>& rows)
         m_visible.append(index);
     }
     endInsertRows();
+    updateCountLines();
     return true;
 }
 

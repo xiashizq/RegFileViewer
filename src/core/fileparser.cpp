@@ -354,6 +354,26 @@ bool rfv::FileParser::parse(const QString& path, const InterfaceDefinition& defi
     if (removedRecordCountLine)
         document.declaredRecordCount = recordCountLineValue;
 
+    // 发送方/接收方/文件日期：OFD 取报文头第 3/4/5 行，
+    // 定长文件取文件名“发送方-接收方-类型-日期”的四段结构。
+    // 这些值可在信息栏中修改，保存时写回报文头并同步更新文件名。
+    if (definition.isOfd()) {
+        if (document.headerLines.size() >= 5) {
+            document.senderCode = document.headerLines.at(2).trimmed();
+            document.receiverCode = document.headerLines.at(3).trimmed();
+            document.fileDate = document.headerLines.at(4).trimmed();
+        }
+    } else if (definition.layout == Layout::Fixed) {
+        const QStringList nameParts =
+                QFileInfo(path).completeBaseName().split(QLatin1Char('-'));
+        if (nameParts.size() >= 4) {
+            document.senderCode = nameParts.at(0);
+            document.receiverCode = nameParts.at(1);
+            if (nameParts.at(3).size() == 8)
+                document.fileDate = nameParts.at(3);
+        }
+    }
+
     // 版本校验
     if (definition.versionCheckRow > 0
         && document.headerLines.size() >= definition.versionCheckRow) {
