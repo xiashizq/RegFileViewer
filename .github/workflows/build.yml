@@ -1,0 +1,85 @@
+name: release
+
+# 手动执行：GitHub 仓库 → Actions → release → Run workflow
+# 发版时先改下面 env 里的 RFV_VERSION，再触发即可
+on:
+  workflow_dispatch:
+
+env:
+  RFV_VERSION: v1.0.0
+
+permissions:
+  contents: write   # 创建 Release 需要
+
+jobs:
+  windows:
+    name: Windows x64 (MSVC)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 安装 Qt 5.15.2 MSVC2019 64-bit（Windows 7 支持的最后一个 Qt 版本）
+      - name: Install Qt 5.15.2
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '5.15.2'
+          arch: 'win64_msvc2019_64'
+          cache: true
+
+      # 配置 MSVC 环境（cl.exe 等进入 PATH）
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (CMake + Ninja)
+        shell: pwsh
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          "-DCMAKE_PREFIX_PATH=${env:QT_ROOT_DIR}"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --parallel
+
+      # 构建完成后自动运行控制台自检，失败则中止
+      - name: Run selftest
+        working-directory: build
+        shell: pwsh
+        run: ./rfv_selftest.exe
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $stage = "package/RegFileViewer-$env:RFV_VERSION-win64"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          # 可执行文件（windeployqt 已在 POST_BUILD 阶段把 Qt DLL 部署到 exe 旁边）
+          Copy-Item build/RegFileViewer.exe  $stage/
+          Copy-Item build/rfv_selftest.exe   $stage/
+
+          # 解析配置（构建后已自动复制到 build/conf）
+          Copy-Item build/conf -Recurse $stage/conf
+
+          # 文档与许可
+          Copy-Item README.md, LICENSE, THIRD_PARTY_NOTICES.md $stage/
+
+          Compress-Archive -Path $stage -DestinationPath "RegFileViewer-$env:RFV_VERSION-win64.zip"
+          Get-ChildItem $stage -Recurse | Select-Object FullName, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RegFileViewer-${{ env.RFV_VERSION }}-win64
+          path: RegFileViewer-*-win64.zip
+
+      # 在当前 commit 上创建 GitHub Release 并附上 zip 包（不要求先打 tag）
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RFV_VERSION }}
+          files: RegFileViewer-*-win64.zip
+          generate_release_notes: true
