@@ -323,6 +323,7 @@ void TableModel::setDocument(Document document)
     m_edits.clear();
     m_hasRemovedRows = false;
     m_metaChanged = false;
+    m_columnFilters.clear();
     endResetModel();
     rebuildVisibleRows();
 }
@@ -338,6 +339,7 @@ void TableModel::clear()
     m_edits.clear();
     m_hasRemovedRows = false;
     m_metaChanged = false;
+    m_columnFilters.clear();
     endResetModel();
 }
 
@@ -520,6 +522,13 @@ QVariant TableModel::headerData(int section, Qt::Orientation orientation, int ro
         return QVariant();
     }
 
+    if (role == Qt::TextAlignmentRole) {
+        // 序号列表头居中显示
+        if (section == 0)
+            return static_cast<int>(Qt::AlignHCenter | Qt::AlignVCenter);
+        return QVariant();
+    }
+
     if (role == Qt::DisplayRole) {
         if (section == 0)
             return QStringLiteral("序号");
@@ -625,7 +634,7 @@ QVariant TableModel::data(const QModelIndex& index, int role) const
             return QStringLiteral("列表序号：%1（仅显示，不写入文件、不参与导出）")
                     .arg(visibleRow + 1);
         if (role == Qt::TextAlignmentRole)
-            return static_cast<int>(Qt::AlignRight | Qt::AlignVCenter);
+            return static_cast<int>(Qt::AlignHCenter | Qt::AlignVCenter);
         if (role == Qt::ForegroundRole)
             return QColor(120, 120, 120);
         return QVariant();
@@ -639,15 +648,8 @@ QVariant TableModel::data(const QModelIndex& index, int role) const
     const FieldDefinition* field = extra ? nullptr
                                          : &m_document.definition.fields.at(dataColumn);
 
-    if (role == Qt::DisplayRole) {
-        const QString value = cellValue(documentRow, dataColumn);
-        if (extra || !m_translate)
-            return value;
-        const QString meaning = translatedValue(documentRow, dataColumn);
-        if (meaning.isEmpty() || meaning == value)
-            return value;
-        return QStringLiteral("%1（%2）").arg(value, meaning);
-    }
+    if (role == Qt::DisplayRole)
+        return displayValue(documentRow, dataColumn);
 
     if (role == Qt::EditRole)
         return cellValue(documentRow, dataColumn);
@@ -828,6 +830,28 @@ void TableModel::setTranslateDictionary(bool enabled)
     }
 }
 
+/// 该行是否同时满足所有非空的列筛选条件（与全文筛选叠加）
+bool TableModel::columnsMatched(int documentRow) const
+{
+    if (!m_hasDocument)
+        return true;
+
+    const int columns = qMin(dataColumnCount(), m_columnFilters.size());
+    for (int column = 0; column < columns; ++column) {
+        const ColumnFilter& filter = m_columnFilters.at(column);
+        if (filter.text.isEmpty() && !filter.filterByValues)
+            continue;
+
+        const QString display = displayValue(documentRow, column);
+        if (!filter.text.isEmpty()
+            && !display.contains(filter.text, Qt::CaseInsensitive))
+            return false;
+        if (filter.filterByValues && !filter.values.contains(display))
+            return false;
+    }
+    return true;
+}
+
 void TableModel::setShowEnglishHeader(bool enabled)
 {
     if (m_showEnglish == enabled)
@@ -842,6 +866,77 @@ void TableModel::setFilter(const QString& text, bool regularExpression)
     m_filterText = text;
     m_filterRegex = regularExpression;
     rebuildVisibleRows();
+}
+
+void TableModel::setColumnFilter(int dataColumn, const ColumnFilter& filter)
+{
+    if (!m_hasDocument || dataColumn < 0 || dataColumn >= dataColumnCount())
+        return;
+
+    if (dataColumn >= m_columnFilters.size())
+        m_columnFilters.resize(dataColumnCount());
+
+    ColumnFilter normalized = filter;
+    normalized.text = filter.text.trimmed();
+
+    if (m_columnFilters.at(dataColumn).text == normalized.text
+        && m_columnFilters.at(dataColumn).filterByValues == normalized.filterByValues
+        && m_columnFilters.at(dataColumn).values == normalized.values)
+        return;
+
+    m_columnFilters[dataColumn] = normalized;
+    rebuildVisibleRows();
+}
+
+void TableModel::clearColumnFilters()
+{
+    if (m_columnFilters.isEmpty())
+        return;
+    m_columnFilters.clear();
+    rebuildVisibleRows();
+}
+
+ColumnFilter TableModel::columnFilter(int dataColumn) const
+{
+    return m_columnFilters.value(dataColumn);
+}
+
+bool TableModel::hasColumnFilters() const
+{
+    return std::any_of(m_columnFilters.cbegin(), m_columnFilters.cend(),
+                       [](const ColumnFilter& filter) {
+        return !filter.text.isEmpty() || filter.filterByValues;
+    });
+}
+
+QStringList TableModel::distinctDisplayValues(int dataColumn) const
+{
+    if (!m_hasDocument || dataColumn < 0 || dataColumn >= dataColumnCount())
+        return QStringList();
+
+    QSet<QString> values;
+    for (int row = 0; row < m_document.rowCount(); ++row)
+        values.insert(displayValue(row, dataColumn));
+
+    QStringList list = QStringList::fromSet(values);
+    std::sort(list.begin(), list.end());
+    return list;
+}
+
+QString TableModel::displayValue(int documentRow, int dataColumn) const
+{
+    if (!m_hasDocument || documentRow < 0 || documentRow >= m_document.rowCount()
+        || dataColumn < 0 || dataColumn >= dataColumnCount())
+        return QString();
+
+    const QString value = cellValue(documentRow, dataColumn);
+    if (isExtraColumn(dataColumn) || !m_translate)
+        return value;
+
+    const QString meaning = translatedValue(documentRow, dataColumn);
+    if (meaning.isEmpty() || meaning == value)
+        return value;
+    return QStringLiteral("%1（%2）").arg(value, meaning);
 }
 
 void TableModel::rebuildVisibleRows()
@@ -868,40 +963,44 @@ void TableModel::rebuildVisibleRows()
 
     visible.reserve(totalRows);
     for (int row = 0; row < totalRows; ++row) {
-        if (filter.isEmpty()) {
-            visible.append(row);
-            continue;
-        }
+        bool matched = true;
 
-        bool matched = false;
-        if (useRegex) {
-            const QString line = m_document.sourceLineText(row);
-            matched = regex.match(line).hasMatch();
-            if (!matched) {
-                for (int column = 0; column < columns && !matched; ++column) {
-                    matched = regex.match(cellValue(row, column)).hasMatch();
-                    if (!matched && m_translate) {
-                        const QString meaning = translatedValue(row, column);
-                        matched = !meaning.isEmpty() && regex.match(meaning).hasMatch();
+        if (!filter.isEmpty()) {
+            matched = false;
+            if (useRegex) {
+                const QString line = m_document.sourceLineText(row);
+                matched = regex.match(line).hasMatch();
+                if (!matched) {
+                    for (int column = 0; column < columns && !matched; ++column) {
+                        matched = regex.match(cellValue(row, column)).hasMatch();
+                        if (!matched && m_translate) {
+                            const QString meaning = translatedValue(row, column);
+                            matched = !meaning.isEmpty() && regex.match(meaning).hasMatch();
+                        }
                     }
                 }
-            }
-        } else {
-            for (int column = 0; column < columns; ++column) {
-                if (cellValue(row, column).contains(filter, Qt::CaseInsensitive)) {
-                    matched = true;
-                    break;
-                }
-                if (m_translate) {
-                    const QString meaning = translatedValue(row, column);
-                    if (!meaning.isEmpty()
-                        && meaning.contains(filter, Qt::CaseInsensitive)) {
+            } else {
+                for (int column = 0; column < columns; ++column) {
+                    if (cellValue(row, column).contains(filter, Qt::CaseInsensitive)) {
                         matched = true;
                         break;
                     }
+                    if (m_translate) {
+                        const QString meaning = translatedValue(row, column);
+                        if (!meaning.isEmpty()
+                            && meaning.contains(filter, Qt::CaseInsensitive)) {
+                            matched = true;
+                            break;
+                        }
+                    }
                 }
             }
         }
+
+        // 列筛选（表头输入框）：各列条件之间取与，与全文筛选叠加
+        if (matched)
+            matched = columnsMatched(row);
+
         if (matched)
             visible.append(row);
     }

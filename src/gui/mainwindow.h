@@ -16,12 +16,13 @@ class QModelIndex;
 class QPlainTextEdit;
 class QPoint;
 class QTabWidget;
-class QTableView;
 class QTableWidget;
 class QTimer;
 
 namespace rfv {
 
+class DataTable;
+class FilterHeaderView;
 class InfoPanel;
 enum class FileTypeReferenceKind;
 
@@ -60,6 +61,7 @@ private:
     void autoSizeColumns();
 
     void applyFilter();
+    void applyColumnFilter();
     void chooseFile();
     void chooseDefinition();
     void exportCsv();
@@ -96,7 +98,8 @@ private:
     ConfigRepository* m_repository = nullptr;
 
     TableModel* m_model = nullptr;
-    QTableView* m_table = nullptr;
+    DataTable* m_table = nullptr;
+    FilterHeaderView* m_filterHeader = nullptr;
     QTableWidget* m_fieldsTable = nullptr;
     QTableWidget* m_overviewTable = nullptr;
     QPlainTextEdit* m_headerView = nullptr;
@@ -114,6 +117,9 @@ private:
     QCheckBox* m_regexBox = nullptr;
     QCheckBox* m_dictionaryBox = nullptr;
     QTimer* m_filterTimer = nullptr;
+    QTimer* m_columnFilterTimer = nullptr;
+    int m_pendingColumn = -1;
+    ColumnFilter m_pendingFilter;
     QTimer* m_overviewTimer = nullptr;
 
     QLabel* m_statusLabel = nullptr;

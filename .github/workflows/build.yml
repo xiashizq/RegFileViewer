@@ -57,7 +57,6 @@ jobs:
           $stage = "package/RegFileViewer-$env:RFV_VERSION-win64"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-          # 可执行文件（windeployqt 已在 POST_BUILD 阶段把 Qt DLL 部署到 exe 旁边）
           Copy-Item build/RegFileViewer.exe  $stage/
           Copy-Item build/rfv_selftest.exe   $stage/
 
@@ -66,6 +65,21 @@ jobs:
 
           # 文档与许可
           Copy-Item README.md, LICENSE, THIRD_PARTY_NOTICES.md $stage/
+
+          # 在打包目录重新部署 Qt 运行库（构建目录里的 DLL 不会被打包步骤带走，
+          # 必须针对打包目录里的 exe 再执行一次 windeployqt，否则用户拿到的包无法启动）
+          $windeployqt = Join-Path $env:QT_ROOT_DIR "bin/windeployqt.exe"
+          if (-not (Test-Path $windeployqt)) { throw "找不到 windeployqt：$windeployqt" }
+          & $windeployqt --release --no-translations --no-system-d3d-compiler --compiler-runtime "$stage/RegFileViewer.exe"
+          if ($LASTEXITCODE -ne 0) { throw "windeployqt 部署 Qt 运行库失败" }
+
+          # 关键运行库缺失则直接失败，避免发出无法启动的包
+          foreach ($dll in @("Qt5Core.dll", "Qt5Gui.dll", "Qt5Widgets.dll")) {
+            if (-not (Test-Path "$stage/$dll")) { throw "打包缺少 Qt 运行库：$dll" }
+          }
+          if (-not (Test-Path "$stage/platforms/qwindows.dll")) {
+            throw "打包缺少 Qt 平台插件：platforms/qwindows.dll"
+          }
 
           Compress-Archive -Path $stage -DestinationPath "RegFileViewer-$env:RFV_VERSION-win64.zip"
           Get-ChildItem $stage -Recurse | Select-Object FullName, Length

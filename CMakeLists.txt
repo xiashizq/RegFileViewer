@@ -80,8 +80,14 @@ add_executable(RegFileViewer WIN32
     src/gui/mainwindow.h
     src/gui/choosedialog.cpp
     src/gui/choosedialog.h
+    src/gui/datatable.cpp
+    src/gui/datatable.h
     src/gui/filetyperefdialog.cpp
     src/gui/filetyperefdialog.h
+    src/gui/filterheader.cpp
+    src/gui/filterheader.h
+    src/gui/filterpopup.cpp
+    src/gui/filterpopup.h
     src/gui/infopanel.cpp
     src/gui/infopanel.h
     ${RFV_WIN_RC}

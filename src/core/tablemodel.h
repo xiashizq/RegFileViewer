@@ -5,9 +5,18 @@
 #include <QAbstractTableModel>
 #include <QHash>
 #include <QRegularExpression>
+#include <QSet>
 #include <QVector>
 
 namespace rfv {
+
+/// 单列的筛选条件：文本包含匹配 + 勾选值集合（Excel 式筛选弹窗产生）
+struct ColumnFilter
+{
+    QString text;              // 文本包含筛选（空表示未启用）
+    bool filterByValues = false; // 是否按勾选值过滤
+    QSet<QString> values;      // 勾选保留的显示值集合
+};
 
 /// 表格模型：每列对应接口字段或用户新增的列。
 /// 字段值按需从原始字节切片解码；编辑内容保存在内存中，导出时生效。
@@ -25,6 +34,18 @@ public:
     void setFilter(const QString& text, bool regularExpression);
     QString filterText() const { return m_filterText; }
     bool filterIsRegularExpression() const { return m_filterRegex; }
+
+    /// 按列筛选：dataColumn 为数据列索引（不含序号列），各列条件之间取与
+    void setColumnFilter(int dataColumn, const ColumnFilter& filter);
+    void clearColumnFilters();
+    ColumnFilter columnFilter(int dataColumn) const;
+    bool hasColumnFilters() const;
+
+    /// 该列所有数据行的去重显示值（含字典翻译，排序后返回，供表头筛选弹窗使用）
+    QStringList distinctDisplayValues(int dataColumn) const;
+
+    /// 单元格的显示文本（与 data() 的 DisplayRole 一致，含字典翻译）
+    QString displayValue(int documentRow, int dataColumn) const;
 
     void setTranslateDictionary(bool enabled);
     bool translateDictionary() const { return m_translate; }
@@ -108,6 +129,7 @@ private:
     QString metadataTargetPath(const QString& path) const;
     QString renameForMetadata(const QString& writtenPath) const;
     QString fieldHeaderText(const FieldDefinition& field) const;
+    bool columnsMatched(int documentRow) const;
     bool applyFieldEdit(QByteArray& row, int fieldIndex, const QString& value,
                         QString* error) const;
     void shiftRowKeys(int insertAt, int count);
@@ -121,6 +143,7 @@ private:
     QVector<int> m_visible;
     QString m_filterText;
     bool m_filterRegex = false;
+    QVector<ColumnFilter> m_columnFilters; // 数据列 -> 筛选条件（默认为空表示不过滤该列）
     bool m_translate = true;
     bool m_showEnglish = false;
 

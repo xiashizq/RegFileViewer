@@ -2,9 +2,10 @@
 
 #include "core/exporter.h"
 #include "gui/choosedialog.h"
+#include "gui/datatable.h"
 #include "gui/filetyperefdialog.h"
+#include "gui/filterheader.h"
 #include "gui/infopanel.h"
-
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
@@ -306,14 +307,12 @@ void MainWindow::buildUi()
     addInfoField(QStringLiteral("接收方"), &m_receiverEdit, 90, 1);
     addInfoField(QStringLiteral("文件日期"), &m_dateEdit, 84, 0);
 
-    // 发送方/接收方/文件日期支持编辑：OFD 写回报文头，其余格式在保存时同步文件名
-    for (QLineEdit* edit : {m_senderEdit, m_receiverEdit, m_dateEdit}) {
-        connect(edit, &QLineEdit::editingFinished,
-                this, &MainWindow::metaInfoEdited);
-    }
+    // 发送方/接收方只读展示，仅文件日期可编辑：OFD 写回报文头，其余格式在保存时同步文件名
+    connect(m_dateEdit, &QLineEdit::editingFinished,
+            this, &MainWindow::metaInfoEdited);
     dataLayout->addWidget(infoBar);
 
-    m_table = new QTableView(dataPage);
+    m_table = new DataTable(dataPage);
     m_table->setModel(m_model);
     m_table->setAlternatingRowColors(true);
     m_table->setSelectionBehavior(QAbstractItemView::SelectItems);
@@ -324,6 +323,12 @@ void MainWindow::buildUi()
     m_table->verticalHeader()->setDefaultSectionSize(22);
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setDefaultSectionSize(130);
+
+    // 表头带“列筛选”输入行：每列标题下方一个输入框，输入后按该列筛选
+    m_filterHeader = new FilterHeaderView(Qt::Horizontal, m_table);
+    m_table->setHorizontalHeader(m_filterHeader);
+    m_table->setFilterHeader(m_filterHeader);
+
     m_table->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     m_table->horizontalHeader()->setHighlightSections(false);
     m_table->setEditTriggers(QAbstractItemView::DoubleClicked
@@ -400,6 +405,18 @@ void MainWindow::buildUi()
     m_filterTimer->setSingleShot(true);
     m_filterTimer->setInterval(220);
     connect(m_filterTimer, &QTimer::timeout, this, &MainWindow::applyFilter);
+
+    // 表头筛选按钮弹出面板后防抖执行
+    m_columnFilterTimer = new QTimer(this);
+    m_columnFilterTimer->setSingleShot(true);
+    m_columnFilterTimer->setInterval(220);
+    connect(m_columnFilterTimer, &QTimer::timeout, this, &MainWindow::applyColumnFilter);
+    connect(m_filterHeader, &FilterHeaderView::filterChanged,
+            this, [this](int logicalIndex, const ColumnFilter& filter) {
+        m_pendingColumn = logicalIndex;
+        m_pendingFilter = filter;
+        m_columnFilterTimer->start();
+    });
 
     connect(m_filterEdit, &QLineEdit::textChanged, this, [this](const QString&) {
         m_filterTimer->start();
@@ -640,6 +657,7 @@ void MainWindow::setDocument(Document document)
 
     if (!m_filterEdit->text().isEmpty())
         m_filterEdit->clear();
+    m_filterHeader->clearFilters();
 
     fillInfoPanel();
     fillInfoBar();
@@ -719,18 +737,15 @@ void MainWindow::metaInfoEdited()
     if (!edit || edit->isReadOnly() || !m_model->document())
         return;
 
-    QString sender = m_senderEdit->text().trimmed();
-    QString receiver = m_receiverEdit->text().trimmed();
-    QString date = m_dateEdit->text().trimmed();
+    const Document* doc = m_model->document();
+    // 非 INI 解析的文件（内部清算等）元数据不可修改
+    if (doc->isDelimited())
+        return;
 
-    // 占位符号与空值视为“清除该值”
-    const auto normalize = [](QString& value) {
-        if (value == QStringLiteral("-"))
-            value.clear();
-    };
-    normalize(sender);
-    normalize(receiver);
-    normalize(date);
+    // 发送方/接收方不允许修改，这里只处理文件日期
+    QString date = m_dateEdit->text().trimmed();
+    if (date == QStringLiteral("-"))
+        date.clear();
 
     // 文件日期参与文件名与报文头校验，必须是 8 位数字
     if (!date.isEmpty() && (date.size() != 8
@@ -742,19 +757,18 @@ void MainWindow::metaInfoEdited()
         return;
     }
 
-    const Document* doc = m_model->document();
-    if (sender == doc->senderCode && receiver == doc->receiverCode
-        && date == doc->fileDate)
+    if (date == doc->fileDate)
         return;
 
-    m_model->setHeaderMetadata(sender, receiver, date);
+    // 发送方/接收方保持原值，仅更新文件日期
+    m_model->setHeaderMetadata(doc->senderCode, doc->receiverCode, date);
 
     fillInfoBar();
     fillHeaderTab();
     fillInfoPanel();
     m_saveAction->setEnabled(m_model->hasUnsavedChanges());
     statusBar()->showMessage(
-        QStringLiteral("发送方/接收方/文件日期已修改，保存后写入文件并同步文件名"), 6000);
+        QStringLiteral("文件日期已修改，保存后写入文件并同步文件名"), 6000);
 }
 
 void MainWindow::fillInfoBar()
@@ -774,13 +788,25 @@ void MainWindow::fillInfoBar()
     }
 
     const InterfaceDefinition& definition = doc->definition;
+
+    // 非 INI 解析的文件（内部清算等分隔符文件）没有接口配置来源：
+    // 接口/文件类型/发送方/接收方/文件日期一律展示为“-”且不可修改。
+    if (definition.isDelimited()) {
+        const QList<QLineEdit*> edits = {m_interfaceEdit, m_fileTypeEdit, m_senderEdit,
+                                         m_receiverEdit, m_dateEdit};
+        for (QLineEdit* edit : edits) {
+            edit->setText(QStringLiteral("-"));
+            edit->setReadOnly(true);
+            edit->setToolTip(QStringLiteral("该文件未通过接口配置（INI）解析，不支持查看与修改"));
+        }
+        return;
+    }
+
     m_interfaceEdit->setText(definition.describe);
     m_interfaceEdit->setToolTip(definition.describe);
 
     QString fileType;
-    if (definition.layout == Layout::Delimited) {
-        fileType = definition.fileType;
-    } else if (definition.isOfd() && doc->headerLines.size() >= 7) {
+    if (definition.isOfd() && doc->headerLines.size() >= 7) {
         fileType = doc->headerLines.at(6).trimmed();
     } else {
         const QRegularExpression pattern(QStringLiteral("(?:^|[-_])(\\d{3})(?:[-_.]|$)"));
@@ -790,47 +816,45 @@ void MainWindow::fillInfoBar()
     }
     m_fileTypeEdit->setText(fileType.isEmpty() ? QStringLiteral("-") : fileType);
 
-    // 发送方/接收方/文件日期显示原始代码（机构名称放到提示里），支持编辑：
-    // OFD 保存时写回报文头第 3/4/5 行；其余格式保存时同步重命名文件。
+    // 发送方/接收方只读展示：显示“代码（机构中文名）”的映射结果，不允许修改。
+    // 文件日期支持编辑：OFD 保存时写回报文头第 5 行；定长文件保存时同步重命名文件。
     const auto describeCode = [this](const QString& code) {
         if (code.isEmpty())
             return QString();
         const QString name = m_repository ? m_repository->codeName(code) : QString();
-        return name.isEmpty() ? code : QStringLiteral("%1 · %2").arg(code, name);
+        return name.isEmpty() ? code : QStringLiteral("%1（%2）").arg(code, name);
     };
 
     const QString editableTip = QStringLiteral("（可直接修改，保存后写入文件）");
+    const QString readonlyTip = QStringLiteral("（只读，不允许修改）");
 
-    // 文件名四段结构（发送方-接收方-类型-日期 / 机构_类型_业务_日期）决定
-    // 内部清算与定长文件能否通过重命名保存这些值
-    const QChar nameSeparator = definition.isDelimited() ? QLatin1Char('_') : QLatin1Char('-');
+    // 文件名四段结构（发送方-接收方-类型-日期）决定
+    // 定长文件能否通过重命名保存文件日期
     const bool nameSupportsMeta =
-            QFileInfo(doc->filePath).completeBaseName().split(nameSeparator).size() >= 4;
+            QFileInfo(doc->filePath).completeBaseName().split(QLatin1Char('-')).size() >= 4;
 
-    const bool senderEditable = definition.isOfd() || nameSupportsMeta;
-    m_senderEdit->setReadOnly(!senderEditable);
-    m_senderEdit->setText(doc->senderCode);
-    m_senderEdit->setToolTip(describeCode(doc->senderCode)
-                             + (senderEditable ? editableTip : QString()));
+    m_senderEdit->setReadOnly(true);
+    m_senderEdit->setText(describeCode(doc->senderCode));
+    m_senderEdit->setToolTip(describeCode(doc->senderCode).isEmpty()
+                             ? QStringLiteral("发送方代码，不可修改")
+                             : QStringLiteral("发送方：%1%2")
+                               .arg(describeCode(doc->senderCode), readonlyTip));
 
-    // 内部清算文件正文与文件名都没有接收方，不支持修改
-    const bool receiverEditable = !definition.isDelimited()
-            && (definition.isOfd() || nameSupportsMeta);
-    m_receiverEdit->setReadOnly(!receiverEditable);
-    if (definition.isDelimited()) {
-        m_receiverEdit->setText(QStringLiteral("-"));
-        m_receiverEdit->setToolTip(QStringLiteral("该文件格式没有接收方信息"));
-    } else {
-        m_receiverEdit->setText(doc->receiverCode);
-        m_receiverEdit->setToolTip(describeCode(doc->receiverCode)
-                                   + (receiverEditable ? editableTip : QString()));
-    }
+    m_receiverEdit->setReadOnly(true);
+    m_receiverEdit->setText(describeCode(doc->receiverCode));
+    m_receiverEdit->setToolTip(describeCode(doc->receiverCode).isEmpty()
+                               ? QStringLiteral("接收方代码，不可修改")
+                               : QStringLiteral("接收方：%1%2")
+                                 .arg(describeCode(doc->receiverCode), readonlyTip));
 
     const bool dateEditable = definition.isOfd() || nameSupportsMeta;
     m_dateEdit->setReadOnly(!dateEditable);
     m_dateEdit->setText(doc->fileDate);
     m_dateEdit->setToolTip(doc->fileDate.isEmpty()
-                           ? QString() : doc->fileDate + (dateEditable ? editableTip : QString()));
+                           ? QString()
+                           : doc->fileDate
+                             + (dateEditable ? editableTip
+                                             : QStringLiteral("（只读，不允许修改）")));
 }
 
 void MainWindow::fillOverviewTab()
@@ -1129,13 +1153,23 @@ void MainWindow::autoSizeColumns()
     const int columns = m_model->columnCount();
 
     for (int column = 0; column < columns; ++column) {
-        int width = m_table->horizontalHeader()->sectionSizeHint(column);
+        // 内容宽度：取样行中最宽的显示文本（含字典翻译）+ 留白
+        int contentWidth = 0;
         for (int row = 0; row < sampleRows; ++row) {
             const QString text = m_model->data(m_model->index(row, column),
                                                Qt::DisplayRole).toString();
-            width = qMax(width, metrics.horizontalAdvance(text) + 24);
+            contentWidth = qMax(contentWidth, metrics.horizontalAdvance(text) + 24);
         }
-        m_table->setColumnWidth(column, qBound(64, width, 380));
+
+        // 表头宽度：列标题完整显示所需的宽度（含筛选按钮占用）
+        const int headerWidth = m_filterHeader
+                ? m_filterHeader->fullHeaderSectionWidth(column) : 0;
+
+        // 内容与表头谁宽用谁，保证表头与内容都不被挤压省略
+        const int width = qMax(contentWidth, headerWidth);
+        // 序号列内容很短，允许更紧凑的最小宽度
+        const int minWidth = column == 0 ? 40 : 64;
+        m_table->setColumnWidth(column, qBound(minWidth, width, 380));
     }
 }
 
@@ -1173,6 +1207,42 @@ void MainWindow::applyFilter()
                 .arg(m_model->rowCount())
                 .arg(m_model->document()->rowCount()), 5000);
     }
+}
+
+void MainWindow::applyColumnFilter()
+{
+    if (!m_model->document() || m_pendingColumn < 1)
+        return;
+
+    // 逻辑列 0 是序号列（不支持筛选），数据列从 1 开始
+    const int dataColumn = m_pendingColumn - 1;
+    const ColumnFilter filter = m_pendingFilter;
+    const bool active = !filter.text.isEmpty() || filter.filterByValues;
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    m_model->setColumnFilter(dataColumn, filter);
+    QApplication::restoreOverrideCursor();
+    updateCounts();
+
+    if (!active)
+        return;
+
+    QString describe;
+    if (filter.filterByValues) {
+        describe = filter.values.isEmpty()
+                ? QStringLiteral("不保留任何值")
+                : QStringLiteral("勾选保留 %1 项").arg(filter.values.size());
+    }
+    if (!filter.text.isEmpty()) {
+        const QString textPart = QStringLiteral("包含 “%1”").arg(filter.text);
+        describe = describe.isEmpty() ? textPart : describe + QStringLiteral(" · ") + textPart;
+    }
+
+    statusBar()->showMessage(
+        QStringLiteral("列“%1”筛选（%2）：显示 %3 / %4 行")
+            .arg(m_model->dataColumnHeader(dataColumn), describe)
+            .arg(m_model->rowCount())
+            .arg(m_model->document()->rowCount()), 5000);
 }
 
 void MainWindow::chooseFile()
@@ -1860,15 +1930,17 @@ void MainWindow::renameSelectedColumn()
 
 void MainWindow::resetFilterForRowEdit()
 {
-    if (m_filterEdit->text().isEmpty() && m_model->filterText().isEmpty())
+    if (m_filterEdit->text().isEmpty() && m_model->filterText().isEmpty()
+        && !m_model->hasColumnFilters())
         return;
 
     const QSignalBlocker blocker(m_filterEdit);
     m_filterEdit->clear();
+    m_filterHeader->clearFilters();
     m_model->setFilter(QString(), false);
+    m_model->clearColumnFilters();
     updateCounts();
-}
-void MainWindow::showCellInfo(const QModelIndex& index)
+}void MainWindow::showCellInfo(const QModelIndex& index)
 {
     const Document* doc = m_model->document();
     if (!doc || !index.isValid())
